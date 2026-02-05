@@ -1,0 +1,30 @@
+# Build artifacts
+/target/
+/cli/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation (internal only)
+*.md
+!README.md
+
+# Generated files
+witness.json
+*.bin
+*.so
+*.o
+
+# Debug
+*.log
+core

@@ -1,0 +1,96 @@
+# ============================================================================
+# Market Data Protocol — The Golden Demo
+# ============================================================================
+#
+# A fixed-layout binary market data protocol inspired by ITCH/Pillar,
+# simplified to demonstrate Siphon's end-to-end value.
+#
+# Characteristics:
+#   - Fixed-size messages (64 bytes)
+#   - No optional fields
+#   - No recursion
+#   - No variable-length strings
+#   - Explicit version byte at offset 0
+#
+# This is a teaching artifact, not a full exchange specification.
+# ============================================================================
+
+protocol MarketData {
+    version: 1;
+    max_size: 64;
+    
+    # ========================================================================
+    # Header (16 bytes)
+    # ========================================================================
+    
+    # Version byte — always at offset 0, drives dispatcher
+    msg_type:       u8  @offset(0)  @range(1, 10);
+    
+    # Flags — bit-packed status indicators
+    flags:          u8  @offset(1);
+    
+    # Sequence number — monotonically increasing
+    sequence:       u32 @offset(4);
+    
+    # Timestamp — nanoseconds since midnight
+    timestamp_ns:   u64 @offset(8);
+    
+    # ========================================================================
+    # Instrument Identification (16 bytes)
+    # ========================================================================
+    
+    # Symbol ID — exchange-assigned numeric identifier
+    symbol_id:      u64 @offset(16) @nonzero;
+    
+    # Market segment — identifies trading venue partition
+    market_segment: u32 @offset(24);
+    
+    # Reserved for future use
+    reserved_1:     u32 @offset(28);
+    
+    # ========================================================================
+    # Price Data (24 bytes)
+    # ========================================================================
+    
+    # Bid price — fixed-point (price * 10000)
+    bid_price:      u64 @offset(32);
+    
+    # Ask price
+    ask_price:      u64 @offset(40);
+    
+    # Last trade price
+    last_price:     u64 @offset(48);
+    
+    # ========================================================================
+    # Volume Data (8 bytes)
+    # ========================================================================
+    
+    # Bid size — number of shares at bid
+    bid_size:       u32 @offset(56);
+    
+    # Ask size — number of shares at ask
+    ask_size:       u32 @offset(60);
+}
+
+# ============================================================================
+# Protocol Invariants (enforced by Siphon)
+# ============================================================================
+#
+# 1. All fields have static offsets — no pointer chasing
+# 2. All constraints are range-based — fuse to SIMD masks
+# 3. No conditional field presence — deterministic parsing
+# 4. 64-byte message fits in single cache line
+# 5. 8-byte aligned price fields enable AVX2 loads
+#
+# ============================================================================
+# Expected RIF Structure
+# ============================================================================
+#
+# Nodes 0-10:  Load operations (one per field)
+# Nodes 11-18: Validate operations (range/nonzero checks)
+# Nodes 19-26: Guard operations (mask chain)
+# Nodes 27-37: Emit operations (output record construction)
+#
+# Total: ~38 RIF nodes → ~50 MicroOps → ~400 bytes machine code
+#
+# ============================================================================

@@ -1,0 +1,20 @@
+[package]
+name = "siphon-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Siphon CLI - Protocol Compiler and Verifier"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "siphon"
+path = "src/main.rs"
+
+[dependencies]
+siphon-tcb = { path = ".." }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

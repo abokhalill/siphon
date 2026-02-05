@@ -1,0 +1,33 @@
+[package]
+name = "siphon-tcb"
+version = "0.1.0"
+edition = "2021"
+description = "Siphon: Deterministic Protocol Execution Engine"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "siphon_tcb"
+path = "src/lib.rs"
+
+[[example]]
+name = "stable_hash_demo"
+path = "examples/stable_hash_demo.rs"
+
+[[example]]
+name = "lowering_demo"
+path = "examples/lowering_demo.rs"
+
+[features]
+default = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+# Phase A (rif, normalize, semantic_hash) forbids unsafe
+# Phase B (lowering) requires unsafe for mmap only
