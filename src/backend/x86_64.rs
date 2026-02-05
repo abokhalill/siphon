@@ -1,7 +1,8 @@
 //! x86_64 AVX2 Encoder
 
-use crate::lowering::target::{MicroOp, SimdWidth, VReg, LoweringError, LaneMask};
-use crate::rif::ScalarType;
+#![allow(dead_code)]
+
+use crate::lowering::target::{MicroOp, SimdWidth, VReg, LoweringError};
 
 /// VEX prefix encoding.
 #[derive(Clone, Copy)]
@@ -110,6 +111,11 @@ impl X86_64Encoder {
     #[inline]
     pub fn len(&self) -> usize {
         self.pos
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.pos == 0
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -316,7 +322,7 @@ impl X86_64Encoder {
 
     pub fn encode_microop(&mut self, op: &MicroOp) -> Result<usize, LoweringError> {
         match op {
-            MicroOp::LoadVector { dst, offset, width, scalar_type, mask } => {
+            MicroOp::LoadVector { dst, offset, width, scalar_type: _, mask } => {
                 let contract = LoadContract::for_load(*offset, *width, *mask, self.packet_len);
                 match contract {
                     LoadContract::UnmaskedUnchecked => {
@@ -335,16 +341,16 @@ impl X86_64Encoder {
                     }
                 }
             }
-            MicroOp::ValidateCmpEq { dst_mask, src, imm_or_reg, scalar_type } => {
+            MicroOp::ValidateCmpEq { dst_mask, src, imm_or_reg, scalar_type: _ } => {
                 self.emit_vpcmpeqq(*dst_mask, *src, *imm_or_reg)
             }
-            MicroOp::ValidateCmpGt { dst_mask, src, comparand, scalar_type } => {
+            MicroOp::ValidateCmpGt { dst_mask, src, comparand, scalar_type: _ } => {
                 self.emit_vpcmpgtq(*dst_mask, *src, *comparand)
             }
-            MicroOp::ValidateCmpLt { dst_mask, src, comparand, scalar_type } => {
+            MicroOp::ValidateCmpLt { dst_mask, src, comparand, scalar_type: _ } => {
                 self.emit_vpcmpgtq(*dst_mask, *comparand, *src)
             }
-            MicroOp::ValidateNonZero { dst_mask, src, scalar_type } => {
+            MicroOp::ValidateNonZero { dst_mask: _, src, scalar_type: _ } => {
                 self.emit_vptest(*src, *src)
             }
             MicroOp::MaskAnd { dst, src1, src2 } => {
@@ -356,24 +362,24 @@ impl X86_64Encoder {
             MicroOp::MaskNot { dst, src } => {
                 self.emit_vpxor(*dst, *src, *src)
             }
-            MicroOp::Select { dst, mask, true_val, false_val, scalar_type } => {
+            MicroOp::Select { dst, mask, true_val, false_val, scalar_type: _ } => {
                 self.emit_vblendvpd(*dst, *false_val, *true_val, *mask)
             }
-            MicroOp::Emit { src, field_offset, scalar_type, mask } => {
+            MicroOp::Emit { src, field_offset, scalar_type: _, mask } => {
                 let offset = *field_offset as u32;
-                if offset % 32 == 0 && mask.is_none() {
+                if offset.is_multiple_of(32) && mask.is_none() {
                     self.emit_vmovntdq_store(*src, offset)
                 } else {
                     self.emit_vmovdqu_store(*src, offset)
                 }
             }
-            MicroOp::BroadcastImm { dst, value, scalar_type } => {
+            MicroOp::BroadcastImm { dst, value, scalar_type: _ } => {
                 self.emit_vpbroadcastq_imm(*dst, *value)
             }
-            MicroOp::Add { dst, src1, src2, scalar_type } => {
+            MicroOp::Add { dst, src1, src2, scalar_type: _ } => {
                 self.emit_vpaddq(*dst, *src1, *src2)
             }
-            MicroOp::Sub { dst, src1, src2, scalar_type } => {
+            MicroOp::Sub { dst, src1, src2, scalar_type: _ } => {
                 self.emit_vpsubq(*dst, *src1, *src2)
             }
             MicroOp::And { dst, src1, src2 } => {
@@ -385,7 +391,7 @@ impl X86_64Encoder {
             MicroOp::Xor { dst, src1, src2 } => {
                 self.emit_vpxor(*dst, *src1, *src2)
             }
-            MicroOp::ByteSwap { dst, src, scalar_type } => {
+            MicroOp::ByteSwap { dst: _, src: _, scalar_type: _ } => {
                 Ok(0)
             }
             MicroOp::Nop { bytes } => {
@@ -495,7 +501,7 @@ mod tests {
         let mut enc = X86_64Encoder::new(1500);
         
         // Fill up the buffer
-        for i in 0..2000 {
+        for _ in 0..2000 {
             if enc.emit_vpand(VReg(0), VReg(1), VReg(2)).is_err() {
                 break;
             }

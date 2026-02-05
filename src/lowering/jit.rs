@@ -2,6 +2,9 @@
 //!
 //! unsafe only for mmap/mprotect.
 
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::result_unit_err)]
+
 use crate::rif::{
     BinaryOp, Constraint, MemoryAccess, NodeIndex, RifGraph, RifNode, ScalarType,
     UnaryOp,
@@ -23,22 +26,16 @@ pub type KernelFn = extern "C" fn(*const u8, u32, *mut u8) -> u32;
 /// Returns bitmask of successful packets (0xF = all succeeded).
 pub type BatchKernelFn = extern "C" fn(*const *const u8, *const u32, *mut *mut u8) -> u32;
 
-/// Verified executable kernel. ready for execution.
+/// Verified executable kernel.
 pub struct LoweredKernel {
-    /// The executable code buffer
     code: ExecutableBuffer,
-    /// The witness proving equivalence
     witness: crate::lowering::witness::Witness,
-    /// MicroOp stream (for debugging/replay)
     ops: MicroOpStream,
-    /// Phase A hash we're equivalent to
     phase_a_hash: SemanticHash,
-    /// Phase B hash (from witness)
     phase_b_hash: SemanticHash,
 }
 
 impl LoweredKernel {
-    /// Get callable function pointer. Valid for lifetime of this struct.
     pub fn as_fn(&self) -> KernelFn {
         self.code.as_fn()
     }
@@ -47,7 +44,6 @@ impl LoweredKernel {
         &self.witness
     }
 
-    /// Get the MicroOp stream
     pub fn ops(&self) -> &[MicroOp] {
         self.ops.as_slice()
     }
@@ -66,7 +62,6 @@ impl LoweredKernel {
 }
 
 /// Batch kernel for SIMD 4-packet parallel processing.
-/// Uses AVX2 YMM registers to process 4 u64 lanes simultaneously.
 pub struct BatchKernel {
     code: ExecutableBuffer,
     witness: crate::lowering::witness::Witness,
@@ -81,10 +76,17 @@ impl BatchKernel {
     pub fn code_size(&self) -> usize {
         self.code.len()
     }
+
+    pub fn witness(&self) -> &crate::lowering::witness::Witness {
+        &self.witness
+    }
+
+    pub fn phase_a_hash(&self) -> &SemanticHash {
+        &self.phase_a_hash
+    }
 }
 
-/// Executable memory buffer. The ONLY unsafe for memory management.
-/// mmap -> write code -> mprotect(EXEC) -> never write again.
+/// Executable memory buffer. mmap -> mprotect(EXEC) -> never write again.
 pub struct ExecutableBuffer {
     ptr: *mut u8,
     len: usize,
@@ -92,7 +94,6 @@ pub struct ExecutableBuffer {
 }
 
 impl ExecutableBuffer {
-    /// Allocate executable memory. This is the ONLY unsafe in the lowering path.
     #[cfg(target_os = "linux")]
     pub fn new(capacity: usize) -> Result<Self, LoweringError> {
         use std::ptr;
@@ -124,7 +125,6 @@ impl ExecutableBuffer {
         })
     }
 
-    /// Fallback for non-Linux (just allocates, won't be executable)
     #[cfg(not(target_os = "linux"))]
     pub fn new(capacity: usize) -> Result<Self, LoweringError> {
         let layout = std::alloc::Layout::from_size_align(capacity, 4096)
@@ -140,7 +140,6 @@ impl ExecutableBuffer {
         })
     }
 
-    /// Write bytes to the buffer
     pub fn write(&mut self, bytes: &[u8]) -> Result<(), LoweringError> {
         if self.len + bytes.len() > self.capacity {
             return Err(LoweringError::ICacheBudgetExceeded {
@@ -150,7 +149,6 @@ impl ExecutableBuffer {
             });
         }
         
-        // SAFETY: we checked bounds above
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.ptr.add(self.len), bytes.len());
         }
@@ -158,10 +156,8 @@ impl ExecutableBuffer {
         Ok(())
     }
 
-    /// Make the buffer executable (and read-only)
     #[cfg(target_os = "linux")]
     pub fn make_executable(&mut self) -> Result<(), LoweringError> {
-        // SAFETY: changing memory protection
         let result = unsafe {
             libc::mprotect(
                 self.ptr as *mut libc::c_void,
@@ -178,13 +174,10 @@ impl ExecutableBuffer {
 
     #[cfg(not(target_os = "linux"))]
     pub fn make_executable(&mut self) -> Result<(), LoweringError> {
-        // No-op on non-Linux, code won't actually be executable
         Ok(())
     }
 
-    /// Get the function pointer
     pub fn as_fn(&self) -> KernelFn {
-        // SAFETY: we made this executable
         unsafe { std::mem::transmute(self.ptr) }
     }
 
@@ -214,7 +207,7 @@ impl Drop for ExecutableBuffer {
     }
 }
 
-/// The lowering engine. Consumes RIF, emits machine code.
+/// Lowering engine. RIF -> machine code.
 pub struct LoweringEngine {
     width: SimdWidth,
     max_packet_len: u16,
@@ -225,14 +218,11 @@ impl LoweringEngine {
         Self { width, max_packet_len }
     }
 
-    /// Transforms RIF to executable code.
-    /// This is the main entry point.
     pub fn lower<'a>(
         &self,
         graph: &RifGraph<'a>,
         phase_a_hash: SemanticHash,
     ) -> Result<LoweredKernel, LoweringError> {
-        // Validate the graph first
         graph.validate().map_err(|_| LoweringError::UnsupportedNode)?;
 
         let initial_lanes = self.width.lanes_for(ScalarType::U64);
@@ -243,7 +233,6 @@ impl LoweringEngine {
         let mut witness_gen = WitnessGenerator::new(phase_a_hash, initial_mask);
         let mut mem_verifier = MemorySafetyVerifier::new(self.max_packet_len);
 
-        // Lower nodes in topological order
         for (idx, node) in graph.nodes.iter().enumerate() {
             let node_idx = NodeIndex(idx as u32);
             self.lower_node(
@@ -256,10 +245,8 @@ impl LoweringEngine {
             )?;
         }
 
-        // Verify memory safety
         mem_verifier.verify_all().map_err(|_| LoweringError::WitnessGenerationFailed)?;
 
-        // Emit machine code
         let mut code = ExecutableBuffer::new(ICACHE_BUDGET_BYTES)?;
         self.emit_prologue(&mut code)?;
         
@@ -282,8 +269,7 @@ impl LoweringEngine {
         })
     }
 
-    /// Lower to batch kernel for SIMD 4-packet parallel processing.
-    /// Uses YMM registers directly instead of stack-based VRegs.
+    /// Lower to batch kernel (SIMD 4-packet parallel).
     pub fn lower_batch<'a>(
         &self,
         graph: &RifGraph<'a>,
@@ -325,7 +311,6 @@ impl LoweringEngine {
         })
     }
 
-    /// Lower a single RIF node to MicroOps
     fn lower_node(
         &self,
         node: &RifNode,
@@ -391,7 +376,6 @@ impl LoweringEngine {
             mask: mask_reg,
         };
 
-        // Record memory access for safety verification
         mem_verifier.record_access(MemoryAccessRecord {
             rif_node: node_idx,
             offset: access.offset,
@@ -419,7 +403,6 @@ impl LoweringEngine {
         let src = regalloc.get(value_node).ok_or(LoweringError::UnsupportedNode)?;
         let mask_reg = access.mask_node_idx.and_then(|m| regalloc.get(m));
 
-        // Emit as store to output region
         let op = MicroOp::Emit {
             src,
             field_offset: access.offset as u16,
@@ -462,7 +445,6 @@ impl LoweringEngine {
             BinaryOp::Or => MicroOp::Or { dst, src1: lhs_reg, src2: rhs_reg },
             BinaryOp::Xor => MicroOp::Xor { dst, src1: lhs_reg, src2: rhs_reg },
             BinaryOp::Eq => {
-                // Comparison produces mask
                 let microop = MicroOp::ValidateCmpEq {
                     dst_mask: dst,
                     src: lhs_reg,
@@ -498,7 +480,6 @@ impl LoweringEngine {
                 regalloc.bind(node_idx, dst);
                 return Ok(());
             }
-            // Other ops need more complex lowering
             _ => return Err(LoweringError::UnsupportedNode),
         };
 
@@ -568,7 +549,6 @@ impl LoweringEngine {
     ) -> Result<(), LoweringError> {
         let dst = regalloc.alloc()?;
         
-        // Convert big-endian bytes to u64
         let val = u64::from_be_bytes(*value);
         
         let op = MicroOp::BroadcastImm {
@@ -597,7 +577,6 @@ impl LoweringEngine {
 
         match constraint {
             Constraint::None => {
-                // Always valid — broadcast all-ones mask
                 let op = MicroOp::BroadcastImm {
                     dst: dst_mask,
                     value: u64::MAX,
@@ -616,10 +595,6 @@ impl LoweringEngine {
                 ops.push(op)?;
             }
             Constraint::Range { lo, hi } => {
-                // value >= lo AND value <= hi
-                // Branchless: (value - lo) <= (hi - lo) using unsigned comparison
-                
-                // Broadcast lo
                 let lo_reg = regalloc.alloc()?;
                 let lo_op = MicroOp::BroadcastImm {
                     dst: lo_reg,
@@ -629,7 +604,6 @@ impl LoweringEngine {
                 witness.record(node_idx, &lo_op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
                 ops.push(lo_op)?;
 
-                // Broadcast hi
                 let hi_reg = regalloc.alloc()?;
                 let hi_op = MicroOp::BroadcastImm {
                     dst: hi_reg,
@@ -639,7 +613,6 @@ impl LoweringEngine {
                 witness.record(node_idx, &hi_op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
                 ops.push(hi_op)?;
 
-                // Compare: value >= lo
                 let ge_mask = regalloc.alloc()?;
                 let ge_op = MicroOp::ValidateCmpGt {
                     dst_mask: ge_mask,
@@ -650,7 +623,6 @@ impl LoweringEngine {
                 witness.record(node_idx, &ge_op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
                 ops.push(ge_op)?;
 
-                // Compare: value <= hi
                 let le_mask = regalloc.alloc()?;
                 let le_op = MicroOp::ValidateCmpLt {
                     dst_mask: le_mask,
@@ -661,7 +633,6 @@ impl LoweringEngine {
                 witness.record(node_idx, &le_op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
                 ops.push(le_op)?;
 
-                // AND the masks
                 let and_op = MicroOp::MaskAnd {
                     dst: dst_mask,
                     src1: ge_mask,
@@ -671,8 +642,6 @@ impl LoweringEngine {
                 ops.push(and_op)?;
             }
             Constraint::Finite => {
-                // For floats: check not NaN and not Inf
-                // This is complex, punt for now
                 return Err(LoweringError::UnsupportedNode);
             }
         }
@@ -695,8 +664,6 @@ impl LoweringEngine {
 
         if let Some(parent) = parent_mask {
             let parent_reg = regalloc.get(parent).ok_or(LoweringError::UnsupportedNode)?;
-            
-            // Refine: new_mask = parent_mask AND condition
             let op = MicroOp::MaskAnd {
                 dst,
                 src1: parent_reg,
@@ -706,19 +673,16 @@ impl LoweringEngine {
             witness.record(node_idx, &op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
             ops.push(op)?;
         } else {
-            // No parent — condition IS the mask
-            // Just copy (or use directly)
             let op = MicroOp::MaskAnd {
                 dst,
                 src1: cond_reg,
-                src2: cond_reg, // AND with self = copy
+                src2: cond_reg,
             };
             witness.record(node_idx, &op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
             ops.push(op)?;
         }
 
-        // Update witness mask state
-        let new_mask = witness.current_mask().and(LaneMask(0xFF)); // simplified
+        let new_mask = witness.current_mask().and(LaneMask(0xFF));
         witness.refine_mask(new_mask).map_err(|_| LoweringError::InvalidMaskChain)?;
         witness.set_mask_reg(dst, new_mask);
 
@@ -782,95 +746,50 @@ impl LoweringEngine {
         Ok(())
     }
 
-    /// Emit function prologue
-    /// Sets up stack frame for virtual register storage
     fn emit_prologue(&self, code: &mut ExecutableBuffer) -> Result<(), LoweringError> {
-        // x86-64 SysV ABI:
-        // rdi = packet ptr, rsi = packet len, rdx = output ptr
-        
-        // PREFETCHT0 [rdi] — bring first cache line into L1 while we set up
-        code.write(&[0x0F, 0x18, 0x07])?;
-        // PREFETCHT0 [rdi+64] — second cache line for larger packets
-        code.write(&[0x0F, 0x18, 0x47, 0x40])?;
-        
-        // push rbp
-        code.write(&[0x55])?;
-        // mov rbp, rsp
-        code.write(&[0x48, 0x89, 0xE5])?;
-        // sub rsp, 128 (0x80) — 16 VRegs * 8 bytes
-        code.write(&[0x48, 0x83, 0xEC, 0x80])?;
-        
-        // push r12 (callee-saved)
-        code.write(&[0x41, 0x54])?;
-        // mov r12, rdx (save output ptr)
-        code.write(&[0x49, 0x89, 0xD4])?;
-        
+        code.write(&[0x0F, 0x18, 0x07])?;         // PREFETCHT0 [rdi]
+        code.write(&[0x0F, 0x18, 0x47, 0x40])?;   // PREFETCHT0 [rdi+64]
+        code.write(&[0x55])?;                     // push rbp
+        code.write(&[0x48, 0x89, 0xE5])?;         // mov rbp, rsp
+        code.write(&[0x48, 0x83, 0xEC, 0x80])?;   // sub rsp, 128
+        code.write(&[0x41, 0x54])?;               // push r12
+        code.write(&[0x49, 0x89, 0xD4])?;         // mov r12, rdx
         Ok(())
     }
 
-    /// Emit function epilogue
     fn emit_epilogue(&self, code: &mut ExecutableBuffer) -> Result<(), LoweringError> {
-        // SFENCE — flush non-temporal stores before returning
-        code.write(&[0x0F, 0xAE, 0xF8])?;
-        // pop r12
-        code.write(&[0x41, 0x5C])?;
-        // mov rsp, rbp
-        code.write(&[0x48, 0x89, 0xEC])?;
-        // pop rbp
-        code.write(&[0x5D])?;
-        // xor eax, eax  ; return 0 (success)
-        code.write(&[0x31, 0xC0])?;
-        // ret
-        code.write(&[0xC3])?;
+        code.write(&[0x0F, 0xAE, 0xF8])?;  // SFENCE
+        code.write(&[0x41, 0x5C])?;        // pop r12
+        code.write(&[0x48, 0x89, 0xEC])?;  // mov rsp, rbp
+        code.write(&[0x5D])?;              // pop rbp
+        code.write(&[0x31, 0xC0])?;        // xor eax, eax
+        code.write(&[0xC3])?;              // ret
         Ok(())
     }
 
-    // =========================================================================
-    // Batch (SIMD) Prologue/Epilogue — YMM register file, no stack spills
-    // =========================================================================
-
-    /// Batch prologue: rdi = packet ptrs[4], rsi = lens[4], rdx = output ptrs[4]
     fn emit_batch_prologue(&self, code: &mut ExecutableBuffer) -> Result<(), LoweringError> {
-        // push rbp; mov rbp, rsp
-        code.write(&[0x55, 0x48, 0x89, 0xE5])?;
-        // Save callee-saved YMM regs if needed (we use YMM0-14, all caller-saved on SysV)
-        // Save r12-r15 for packet ptr array iteration
-        code.write(&[0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57])?;
-        // mov r12, rdi (packet ptrs)
-        code.write(&[0x49, 0x89, 0xFC])?;
-        // mov r13, rsi (lens)
-        code.write(&[0x49, 0x89, 0xF5])?;
-        // mov r14, rdx (output ptrs)
-        code.write(&[0x49, 0x89, 0xD6])?;
-        // VZEROALL to clear YMM state (avoid SSE/AVX transition penalty)
-        code.write(&[0xC5, 0xFC, 0x77])?;
+        code.write(&[0x55, 0x48, 0x89, 0xE5])?;                       // push rbp; mov rbp, rsp
+        code.write(&[0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57])?; // push r12-r15
+        code.write(&[0x49, 0x89, 0xFC])?;                             // mov r12, rdi
+        code.write(&[0x49, 0x89, 0xF5])?;                             // mov r13, rsi
+        code.write(&[0x49, 0x89, 0xD6])?;                             // mov r14, rdx
+        code.write(&[0xC5, 0xFC, 0x77])?;                             // VZEROALL
         Ok(())
     }
 
-    /// Batch epilogue: return success mask in eax
     fn emit_batch_epilogue(&self, code: &mut ExecutableBuffer) -> Result<(), LoweringError> {
-        // SFENCE
-        code.write(&[0x0F, 0xAE, 0xF8])?;
-        // VZEROUPPER (avoid AVX->SSE transition penalty)
-        code.write(&[0xC5, 0xF8, 0x77])?;
-        // pop r15-r12
-        code.write(&[0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C])?;
-        // mov rsp, rbp; pop rbp
-        code.write(&[0x48, 0x89, 0xEC, 0x5D])?;
-        // mov eax, 0xF (all 4 packets succeeded)
-        code.write(&[0xB8, 0x0F, 0x00, 0x00, 0x00])?;
-        // ret
-        code.write(&[0xC3])?;
+        code.write(&[0x0F, 0xAE, 0xF8])?;                             // SFENCE
+        code.write(&[0xC5, 0xF8, 0x77])?;                             // VZEROUPPER
+        code.write(&[0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C])?; // pop r15-r12
+        code.write(&[0x48, 0x89, 0xEC, 0x5D])?;                       // mov rsp, rbp; pop rbp
+        code.write(&[0xB8, 0x0F, 0x00, 0x00, 0x00])?;                 // mov eax, 0xF
+        code.write(&[0xC3])?;                                         // ret
         Ok(())
     }
 
-    /// Emit batch MicroOp using AVX2 instructions
     fn emit_batch_microop(&self, op: &MicroOp, code: &mut ExecutableBuffer) -> Result<(), LoweringError> {
         match op {
             MicroOp::LoadVector { dst, offset, width: _, scalar_type: _, mask: _ } => {
-                // For batch: load same offset from 4 packets into YMM lanes
-                // This requires gather or 4 scalar loads + insert
-                // Simplified: use VBROADCASTSD from first packet for now
                 self.emit_batch_load(code, *dst, *offset)
             }
             MicroOp::Emit { src, field_offset, scalar_type: _, mask: _ } => {
@@ -883,7 +802,6 @@ impl LoweringEngine {
                 self.emit_vpcmpgtq(code, *dst_mask, *src, *comparand)
             }
             MicroOp::ValidateCmpLt { dst_mask, src, comparand, scalar_type: _ } => {
-                // lt = swap operands for gt
                 self.emit_vpcmpgtq(code, *dst_mask, *comparand, *src)
             }
             MicroOp::ValidateCmpEq { dst_mask, src, imm_or_reg, scalar_type: _ } => {
@@ -899,8 +817,7 @@ impl LoweringEngine {
                 self.emit_vpor(code, *dst, *src1, *src2)
             }
             MicroOp::MaskNot { dst, src } => {
-                // XOR with all-ones
-                self.emit_vpxor(code, *dst, *src, *src) // placeholder
+                self.emit_vpxor(code, *dst, *src, *src)
             }
             MicroOp::Select { dst, mask, true_val, false_val, scalar_type: _ } => {
                 self.emit_vblendvpd(code, *dst, *false_val, *true_val, *mask)
@@ -921,7 +838,6 @@ impl LoweringEngine {
                 self.emit_vpxor(code, *dst, *src1, *src2)
             }
             MicroOp::ByteSwap { dst: _, src: _, scalar_type: _ } => {
-                // VPSHUFB for byte swap — complex, skip for now
                 Ok(())
             }
             MicroOp::Nop { bytes } => {
@@ -930,111 +846,85 @@ impl LoweringEngine {
         }
     }
 
-    /// Batch load: broadcast from [r12] + offset into YMM
     fn emit_batch_load(&self, code: &mut ExecutableBuffer, dst: VReg, offset: u32) -> Result<(), LoweringError> {
         let dst_reg = dst.0 & 0x0F;
-        // mov rax, [r12] (first packet ptr)
-        code.write(&[0x49, 0x8B, 0x04, 0x24])?;
-        // VBROADCASTSD ymm, [rax + offset]
+        code.write(&[0x49, 0x8B, 0x04, 0x24])?;  // mov rax, [r12]
         if dst_reg < 8 {
             code.write(&[0xC4, 0xE2, 0x7D, 0x19])?;
         } else {
             code.write(&[0xC4, 0x62, 0x7D, 0x19])?;
         }
-        let modrm = 0x80 | ((dst_reg & 7) << 3) | 0x00; // [rax + disp32]
+        let modrm = 0x80 | ((dst_reg & 7) << 3);
         code.write(&[modrm])?;
         code.write(&offset.to_le_bytes())?;
         Ok(())
     }
 
-    /// Batch store: VMOVNTDQ to [r14] + offset
     fn emit_batch_store(&self, code: &mut ExecutableBuffer, src: VReg, offset: u32) -> Result<(), LoweringError> {
         let src_reg = src.0 & 0x0F;
-        // mov rax, [r14] (first output ptr)
-        code.write(&[0x49, 0x8B, 0x06])?;
-        // VMOVNTDQ [rax + offset], ymm
+        code.write(&[0x49, 0x8B, 0x06])?;  // mov rax, [r14]
         if src_reg < 8 {
             code.write(&[0xC5, 0xFD, 0xE7])?;
         } else {
             code.write(&[0xC4, 0x41, 0x7D, 0xE7])?;
         }
-        let modrm = 0x80 | ((src_reg & 7) << 3) | 0x00;
+        let modrm = 0x80 | ((src_reg & 7) << 3);
         code.write(&[modrm])?;
         code.write(&offset.to_le_bytes())?;
         Ok(())
     }
 
-    /// Emit a single MicroOp to machine code
     fn emit_microop(&self, op: &MicroOp, code: &mut ExecutableBuffer) -> Result<(), LoweringError> {
         match op {
             MicroOp::LoadVector { dst, offset, width: _, scalar_type, mask: _ } => {
-                // For correctness, emit scalar load that matches reference interpreter
-                // MOV rax, [rdi + offset] (8-byte load)
                 self.emit_scalar_load(code, *dst, *offset, *scalar_type)
             }
             MicroOp::Emit { src, field_offset, scalar_type, mask: _ } => {
-                // For correctness, emit scalar store that matches reference interpreter
-                // MOV [rdx + offset], rax (8-byte store)
                 self.emit_scalar_store(code, *src, *field_offset as u32, *scalar_type)
             }
             MicroOp::BroadcastImm { dst, value, scalar_type: _ } => {
-                // Scalar: MOV imm64 to stack slot
                 self.emit_scalar_const(code, *dst, *value)
             }
             MicroOp::ValidateCmpGt { dst_mask, src, comparand, scalar_type: _ } => {
-                // Scalar: CMP and SETG to produce mask (1 = pass, 0 = fail)
                 self.emit_scalar_cmp_gt(code, *dst_mask, *src, *comparand)
             }
             MicroOp::ValidateCmpLt { dst_mask, src, comparand, scalar_type: _ } => {
-                // Scalar: CMP and SETL
                 self.emit_scalar_cmp_lt(code, *dst_mask, *src, *comparand)
             }
             MicroOp::ValidateCmpEq { dst_mask, src, imm_or_reg, scalar_type: _ } => {
-                // Scalar: CMP and SETE
                 self.emit_scalar_cmp_eq(code, *dst_mask, *src, *imm_or_reg)
             }
             MicroOp::ValidateNonZero { dst_mask, src, scalar_type: _ } => {
-                // Scalar: TEST and SETNE
                 self.emit_scalar_test_nonzero(code, *dst_mask, *src)
             }
             MicroOp::MaskAnd { dst, src1, src2 } => {
-                // Scalar: AND of mask values
                 self.emit_scalar_mask_and(code, *dst, *src1, *src2)
             }
             MicroOp::MaskOr { dst, src1, src2 } => {
-                // Scalar: OR of mask values
                 self.emit_scalar_mask_or(code, *dst, *src1, *src2)
             }
             MicroOp::MaskNot { dst, src } => {
-                // Scalar: XOR with 1
                 self.emit_scalar_mask_not(code, *dst, *src)
             }
             MicroOp::Select { dst, mask, true_val, false_val, scalar_type: _ } => {
-                // Scalar: CMOV based on mask
                 self.emit_scalar_select(code, *dst, *mask, *true_val, *false_val)
             }
             MicroOp::Add { dst, src1, src2, scalar_type: _ } => {
-                // Scalar: ADD
                 self.emit_scalar_add(code, *dst, *src1, *src2)
             }
             MicroOp::Sub { dst, src1, src2, scalar_type: _ } => {
-                // Scalar: SUB
                 self.emit_scalar_sub(code, *dst, *src1, *src2)
             }
             MicroOp::And { dst, src1, src2 } => {
-                // Scalar: AND
                 self.emit_scalar_and(code, *dst, *src1, *src2)
             }
             MicroOp::Or { dst, src1, src2 } => {
-                // Scalar: OR
                 self.emit_scalar_or(code, *dst, *src1, *src2)
             }
             MicroOp::Xor { dst, src1, src2 } => {
-                // Scalar: XOR
                 self.emit_scalar_xor(code, *dst, *src1, *src2)
             }
             MicroOp::ByteSwap { dst, src, scalar_type: _ } => {
-                // Scalar: BSWAP
                 self.emit_scalar_bswap(code, *dst, *src)
             }
             MicroOp::Nop { bytes } => {
@@ -1043,62 +933,26 @@ impl LoweringEngine {
         }
     }
 
-    // =========================================================================
-    // x86-64 Scalar Instruction Emitters (for correctness)
-    // =========================================================================
-
-    /// Scalar load: Load from packet into RAX, then store to stack slot for VReg
-    /// Stack layout: [rbp - 8*(vreg+1)] = value for VReg
     fn emit_scalar_load(&self, code: &mut ExecutableBuffer, dst: VReg, offset: u32, scalar_type: ScalarType) -> Result<(), LoweringError> {
-        // Step 1: Load from packet [rdi + offset] into RAX
         match scalar_type.size_bytes() {
-            8 => {
-                // MOV RAX, [RDI + disp32]
-                // 48 8B 87 <disp32>
-                code.write(&[0x48, 0x8B, 0x87])?;
-                code.write(&offset.to_le_bytes())?;
-            }
-            4 => {
-                // MOV EAX, [RDI + disp32] (zero-extends to RAX)
-                // 8B 87 <disp32>
-                code.write(&[0x8B, 0x87])?;
-                code.write(&offset.to_le_bytes())?;
-            }
-            2 => {
-                // MOVZX EAX, WORD PTR [RDI + disp32]
-                // 0F B7 87 <disp32>
-                code.write(&[0x0F, 0xB7, 0x87])?;
-                code.write(&offset.to_le_bytes())?;
-            }
-            1 => {
-                // MOVZX EAX, BYTE PTR [RDI + disp32]
-                // 0F B6 87 <disp32>
-                code.write(&[0x0F, 0xB6, 0x87])?;
-                code.write(&offset.to_le_bytes())?;
-            }
-            _ => {
-                code.write(&[0x48, 0x8B, 0x87])?;
-                code.write(&offset.to_le_bytes())?;
-            }
+            8 => { code.write(&[0x48, 0x8B, 0x87])?; code.write(&offset.to_le_bytes())?; }
+            4 => { code.write(&[0x8B, 0x87])?; code.write(&offset.to_le_bytes())?; }
+            2 => { code.write(&[0x0F, 0xB7, 0x87])?; code.write(&offset.to_le_bytes())?; }
+            1 => { code.write(&[0x0F, 0xB6, 0x87])?; code.write(&offset.to_le_bytes())?; }
+            _ => { code.write(&[0x48, 0x8B, 0x87])?; code.write(&offset.to_le_bytes())?; }
         }
         
-        // Step 2: Store RAX to stack slot [rbp - 8*(vreg+1)]
         let stack_offset = -8 * (dst.0 as i32 + 1);
-        // 48 89 45 <disp8>
         if stack_offset >= -128 {
             code.write(&[0x48, 0x89, 0x45, stack_offset as u8])?;
         } else {
             code.write(&[0x48, 0x89, 0x85])?;
             code.write(&stack_offset.to_le_bytes())?;
         }
-        
         Ok(())
     }
 
-    /// Scalar store: VReg -> output [r12 + offset].
-    /// Uses MOVNTI for non-temporal hint (bypasses cache, better for streaming).
     fn emit_scalar_store(&self, code: &mut ExecutableBuffer, src: VReg, offset: u32, _scalar_type: ScalarType) -> Result<(), LoweringError> {
-        // Load VReg from stack into RAX
         let stack_offset = -8 * (src.0 as i32 + 1);
         if stack_offset >= -128 {
             code.write(&[0x48, 0x8B, 0x45, stack_offset as u8])?;
@@ -1107,22 +961,17 @@ impl LoweringEngine {
             code.write(&stack_offset.to_le_bytes())?;
         }
         
-        // MOVNTI [r12 + offset], RAX — non-temporal store, bypasses cache
-        // 49 0F C3 44 24 <disp8> or 49 0F C3 84 24 <disp32>
         if offset < 128 {
-            code.write(&[0x49, 0x0F, 0xC3, 0x44, 0x24, offset as u8])?;
+            code.write(&[0x49, 0x0F, 0xC3, 0x44, 0x24, offset as u8])?;  // MOVNTI
         } else {
             code.write(&[0x49, 0x0F, 0xC3, 0x84, 0x24])?;
             code.write(&offset.to_le_bytes())?;
         }
-        
         Ok(())
     }
 
-    /// Store immediate to VReg stack slot.
     fn emit_scalar_const(&self, code: &mut ExecutableBuffer, dst: VReg, value: u64) -> Result<(), LoweringError> {
-        // MOV RAX, imm64
-        code.write(&[0x48, 0xB8])?;
+        code.write(&[0x48, 0xB8])?;  // MOV RAX, imm64
         code.write(&value.to_le_bytes())?;
         
         let stack_offset = -8 * (dst.0 as i32 + 1);
@@ -1171,10 +1020,8 @@ impl LoweringEngine {
     fn emit_scalar_cmp_gt(&self, code: &mut ExecutableBuffer, dst_mask: VReg, src: VReg, comparand: VReg) -> Result<(), LoweringError> {
         self.emit_load_vreg_to_rax(code, src)?;
         self.emit_load_vreg_to_rcx(code, comparand)?;
-        // CMP RAX, RCX
-        code.write(&[0x48, 0x39, 0xC8])?;
-        code.write(&[0x0F, 0x9F, 0xC0])?;
-        // MOVZX RAX, AL
+        code.write(&[0x48, 0x39, 0xC8])?;  // CMP RAX, RCX
+        code.write(&[0x0F, 0x9F, 0xC0])?;  // SETG AL
         code.write(&[0x48, 0x0F, 0xB6, 0xC0])?;
         self.emit_store_rax_to_vreg(code, dst_mask)
     }
@@ -1348,7 +1195,7 @@ impl LoweringEngine {
             code.write(&[0xC4, 0x61, 0xF9])?;
         }
         code.write(&[0x6E])?;
-        let modrm = 0xC0 | ((dst_reg & 7) << 3) | 0x00;
+        let modrm = 0xC0 | ((dst_reg & 7) << 3);
         code.write(&[modrm])?;
         
         if dst_reg < 8 {
@@ -1399,7 +1246,7 @@ impl LoweringEngine {
         let byte1 = r | 0x40 | b | 0x02;
         
         let vvvv = (!(src1_reg) & 0x0F) << 3;
-        let byte2 = 0x00 | vvvv | 0x05; // W=0, vvvv, L=1, pp=01
+        let byte2 = vvvv | 0x05;
         
         code.write(&[0xC4, byte1, byte2])?;
         code.write(&[0x29])?;
@@ -1436,7 +1283,7 @@ impl LoweringEngine {
             let b = if src2_reg < 8 { 0x20 } else { 0x00 };
             let byte1 = r | 0x40 | b | 0x01;
             let vvvv = (!(src1_reg) & 0x0F) << 3;
-            let byte2 = 0x00 | vvvv | 0x05;
+            let byte2 = vvvv | 0x05;
             code.write(&[0xC4, byte1, byte2])?;
         }
         
@@ -1463,7 +1310,7 @@ impl LoweringEngine {
             let b = if src2_reg < 8 { 0x20 } else { 0x00 };
             let byte1 = r | 0x40 | b | 0x01;
             let vvvv = (!(src1_reg) & 0x0F) << 3;
-            let byte2 = 0x00 | vvvv | 0x05;
+            let byte2 = vvvv | 0x05;
             code.write(&[0xC4, byte1, byte2])?;
         }
         
@@ -1490,7 +1337,7 @@ impl LoweringEngine {
             let b = if src2_reg < 8 { 0x20 } else { 0x00 };
             let byte1 = r | 0x40 | b | 0x01;
             let vvvv = (!(src1_reg) & 0x0F) << 3;
-            let byte2 = 0x00 | vvvv | 0x05;
+            let byte2 = vvvv | 0x05;
             code.write(&[0xC4, byte1, byte2])?;
         }
         
@@ -1515,7 +1362,7 @@ impl LoweringEngine {
         let byte1 = r | 0x40 | b | 0x03; // mmmmm = 00011 (0F3A)
         
         let vvvv = (!(src1_reg) & 0x0F) << 3;
-        let byte2 = 0x00 | vvvv | 0x05; // W=0, L=1, pp=01
+        let byte2 = vvvv | 0x05;
         
         code.write(&[0xC4, byte1, byte2])?;
         code.write(&[0x4B])?;
@@ -1545,7 +1392,7 @@ impl LoweringEngine {
             let b = if src2_reg < 8 { 0x20 } else { 0x00 };
             let byte1 = r | 0x40 | b | 0x01;
             let vvvv = (!(src1_reg) & 0x0F) << 3;
-            let byte2 = 0x00 | vvvv | 0x05;
+            let byte2 = vvvv | 0x05;
             code.write(&[0xC4, byte1, byte2])?;
         }
         
@@ -1572,7 +1419,7 @@ impl LoweringEngine {
             let b = if src2_reg < 8 { 0x20 } else { 0x00 };
             let byte1 = r | 0x40 | b | 0x01;
             let vvvv = (!(src1_reg) & 0x0F) << 3;
-            let byte2 = 0x00 | vvvv | 0x05;
+            let byte2 = vvvv | 0x05;
             code.write(&[0xC4, byte1, byte2])?;
         }
         

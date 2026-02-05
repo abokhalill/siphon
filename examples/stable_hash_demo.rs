@@ -182,10 +182,10 @@ fn demo_hash_stability() {
 
     let mut hashes: [[u8; 32]; 10] = [[0u8; 32]; 10];
 
-    for i in 0..10 {
+    for (i, hash_slot) in hashes.iter_mut().enumerate() {
         match compute_semantic_hash(&graph) {
             Ok(hash) => {
-                hashes[i] = *hash.as_bytes();
+                *hash_slot = *hash.as_bytes();
             }
             Err(e) => {
                 println!("  Iteration {}: ERROR - {}", i, e);

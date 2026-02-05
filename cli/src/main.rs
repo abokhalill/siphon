@@ -107,14 +107,12 @@ fn print_usage() {
     eprintln!("    siphon verify witness.json");
 }
 
-/// Phase A only: RIF construction and semantic hash
 fn cmd_check(protocol_path: &str) -> ExitCode {
     println!("═══════════════════════════════════════════════════════════════");
     println!("  SIPHON CHECK — Phase A Verification");
     println!("═══════════════════════════════════════════════════════════════");
     println!();
     
-    // Load and parse protocol
     let protocol = match load_protocol(protocol_path) {
         Ok(p) => p,
         Err(e) => {
@@ -126,10 +124,7 @@ fn cmd_check(protocol_path: &str) -> ExitCode {
     println!("Protocol: {}", protocol_path);
     println!();
     
-    // Build RIF graph (Phase A)
     let graph = protocol.to_rif_graph();
-    
-    // Compute semantic hash
     let sha = match compute_semantic_hash(&graph) {
         Ok(h) => h,
         Err(e) => {
@@ -138,7 +133,6 @@ fn cmd_check(protocol_path: &str) -> ExitCode {
         }
     };
     
-    // Output Phase A results
     println!("┌─────────────────────────────────────────────────────────────┐");
     println!("│ PHASE A RESULTS                                             │");
     println!("├─────────────────────────────────────────────────────────────┤");
@@ -153,7 +147,6 @@ fn cmd_check(protocol_path: &str) -> ExitCode {
     println!("└─────────────────────────────────────────────────────────────┘");
     println!();
     
-    // Validation summary
     println!("VALIDATION SUMMARY:");
     let validation = validate_rif(&graph);
     println!("  Bounds checks:    {:>3} (all static)", validation.bounds_checks);
@@ -174,14 +167,12 @@ fn cmd_check(protocol_path: &str) -> ExitCode {
     }
 }
 
-/// Phase A + Phase B: Full compilation to machine code
 fn cmd_compile(protocol_path: &str, witness_file: Option<&str>) -> ExitCode {
     println!("═══════════════════════════════════════════════════════════════");
     println!("  SIPHON COMPILE — Phase A + Phase B");
     println!("═══════════════════════════════════════════════════════════════");
     println!();
     
-    // Load and parse protocol
     let protocol = match load_protocol(protocol_path) {
         Ok(p) => p,
         Err(e) => {
@@ -193,7 +184,6 @@ fn cmd_compile(protocol_path: &str, witness_file: Option<&str>) -> ExitCode {
     println!("Protocol: {}", protocol_path);
     println!();
     
-    // Phase A: Build RIF graph
     let graph = protocol.to_rif_graph();
     let sha = match compute_semantic_hash(&graph) {
         Ok(h) => h,
@@ -203,7 +193,6 @@ fn cmd_compile(protocol_path: &str, witness_file: Option<&str>) -> ExitCode {
         }
     };
     
-    // Phase B: Lower to machine code
     let engine = LoweringEngine::new(SimdWidth::Avx2, graph.max_packet_length);
     let kernel = match engine.lower(&graph, sha) {
         Ok(k) => k,
@@ -234,7 +223,6 @@ fn cmd_compile(protocol_path: &str, witness_file: Option<&str>) -> ExitCode {
     println!("└─────────────────────────────────────────────────────────────┘");
     println!();
     
-    // I-cache budget check
     let icache_pct = (kernel.code_size() as f64 / 16384.0) * 100.0;
     if icache_pct > 87.5 {
         println!("⚠ WARNING: I-cache usage at {:.1}% of 16KB budget", icache_pct);
@@ -242,7 +230,6 @@ fn cmd_compile(protocol_path: &str, witness_file: Option<&str>) -> ExitCode {
         println!("✓ I-cache usage: {:.1}% of 16KB budget", icache_pct);
     }
     
-    // Emit witness if requested
     if let Some(witness_path) = witness_file {
         let serialized = SerializedWitness::from_kernel(
             kernel.witness(),
@@ -265,14 +252,12 @@ fn cmd_compile(protocol_path: &str, witness_file: Option<&str>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Verify a witness artifact
 fn cmd_verify(witness_path: &str) -> ExitCode {
     println!("═══════════════════════════════════════════════════════════════");
     println!("  SIPHON VERIFY — Witness Verification");
     println!("═══════════════════════════════════════════════════════════════");
     println!();
     
-    // Load witness file
     let json = match fs::read_to_string(witness_path) {
         Ok(j) => j,
         Err(e) => {
@@ -284,7 +269,6 @@ fn cmd_verify(witness_path: &str) -> ExitCode {
     println!("Witness: {}", witness_path);
     println!();
     
-    // Parse witness
     let witness = match SerializedWitness::from_json(&json) {
         Ok(w) => w,
         Err(e) => {
@@ -293,7 +277,6 @@ fn cmd_verify(witness_path: &str) -> ExitCode {
         }
     };
     
-    // Display witness metadata
     println!("┌─────────────────────────────────────────────────────────────┐");
     println!("│ WITNESS METADATA                                            │");
     println!("├─────────────────────────────────────────────────────────────┤");
@@ -348,7 +331,6 @@ fn cmd_bench(protocol_path: &str) -> ExitCode {
     println!("═══════════════════════════════════════════════════════════════");
     println!();
     
-    // Load and parse protocol
     let protocol = match load_protocol(protocol_path) {
         Ok(p) => p,
         Err(e) => {

@@ -12,6 +12,7 @@ const IORING_OFF_SQ_RING: i64 = 0;
 #[cfg(target_os = "linux")]
 const IORING_OFF_CQ_RING: i64 = 0x8000000;
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 const IORING_OFF_SQES: i64 = 0x10000000;
 
 #[repr(C)]
@@ -64,10 +65,8 @@ pub const MAX_PROTOCOL_VERSIONS: usize = 256;
 
 pub const BATCH_SIZE: usize = 32;
 
-/// Output record size (32-byte aligned for VMOVNTDQ).
 pub const RECORD_SIZE: usize = 256;
 
-/// Per-core output buffer. No heap growth.
 #[repr(C, align(32))]
 pub struct OutputBuffer {
     data: [u8; RECORD_SIZE * BATCH_SIZE],
@@ -94,7 +93,12 @@ impl OutputBuffer {
     }
 }
 
-/// Version dispatcher. Bounded jump table, Spectre-safe.
+impl Default for OutputBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct VersionDispatcher {
     kernels: [Option<KernelFn>; MAX_PROTOCOL_VERSIONS],
     slow_path: SlowPathFn,
@@ -103,7 +107,6 @@ pub struct VersionDispatcher {
 
 pub type SlowPathFn = fn(*const u8, u32, u8) -> ();
 
-/// Dispatch stats (cache-line padded to prevent false sharing).
 #[repr(C, align(64))]
 pub struct DispatchStats {
     pub packets_fast: u64,
@@ -125,6 +128,12 @@ impl DispatchStats {
     }
 }
 
+impl Default for DispatchStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VersionDispatcher {
     pub fn new(slow_path: SlowPathFn) -> Self {
         Self {
@@ -134,14 +143,14 @@ impl VersionDispatcher {
         }
     }
 
-    /// Register a kernel for a protocol version
     pub fn register(&mut self, version: u8, kernel: KernelFn) {
         self.kernels[version as usize] = Some(kernel);
     }
 
-    /// Dispatch packet. LFENCE before table lookup for Spectre safety.
+    /// # Safety
+    /// `packet` must be valid for reads of at least 1 byte. `output` must be valid for writes.
     #[inline]
-    pub fn dispatch(
+    pub unsafe fn dispatch(
         &mut self,
         packet: *const u8,
         len: u32,
@@ -151,7 +160,7 @@ impl VersionDispatcher {
             return DispatchResult::InvalidPacket;
         }
         
-        let version = unsafe { *packet };
+        let version = *packet;
         
         #[cfg(target_arch = "x86_64")]
         unsafe {
@@ -199,13 +208,13 @@ pub struct PacketDesc {
     pub buffer_id: u32,
 }
 
-/// io_uring packet loop. Poll CQ, batch, process, repeat.
 #[cfg(target_os = "linux")]
 pub struct PacketLoop {
     ring_fd: i32,
+    #[allow(dead_code)]
     cq_ring: *mut u8,
+    #[allow(dead_code)]
     sq_ring: *mut u8,
-    // CQ ring state for lockless polling
     cq_head: *mut u32,
     cq_tail: *mut u32,
     cq_mask: u32,
@@ -220,7 +229,7 @@ pub struct PacketLoop {
 #[cfg(target_os = "linux")]
 impl PacketLoop {
     /// # Safety
-    /// Requires io_uring support and sufficient RLIMIT_MEMLOCK.
+    /// Requires io_uring kernel support and sufficient RLIMIT_MEMLOCK.
     pub unsafe fn new(
         ring_size: u32,
         buffer_count: u32,
@@ -270,7 +279,6 @@ impl PacketLoop {
         let buffers = RegisteredBuffers::new(buffer_count, buffer_size)?;
         buffers.register(ring_fd)?;
         
-        // Extract CQ ring pointers from mapped memory
         let cq_head = cq_ring.add(params.cq_off.head as usize) as *mut u32;
         let cq_tail = cq_ring.add(params.cq_off.tail as usize) as *mut u32;
         let cq_mask = *(cq_ring.add(params.cq_off.ring_mask as usize) as *const u32);
@@ -292,12 +300,10 @@ impl PacketLoop {
         })
     }
 
-    /// Register a kernel for a protocol version
     pub fn register_kernel(&mut self, version: u8, kernel: KernelFn) {
         self.dispatcher.register(version, kernel);
     }
 
-    /// The hot loop. Never returns. No allocations, no syscalls.
     #[inline(never)]
     pub fn run(&mut self) -> ! {
         loop {
@@ -315,16 +321,10 @@ impl PacketLoop {
         }
     }
 
-    /// Poll CQ for completions. Lockless, no syscalls.
     #[inline]
     fn poll_completions(&mut self) -> usize {
-        // Atomic load of tail (producer), relaxed load of head (we own it)
-        let tail = unsafe { 
-            core::ptr::read_volatile(self.cq_tail) 
-        };
-        let head = unsafe { 
-            core::ptr::read_volatile(self.cq_head) 
-        };
+        let tail = unsafe { core::ptr::read_volatile(self.cq_tail) };
+        let head = unsafe { core::ptr::read_volatile(self.cq_head) };
         
         let available = tail.wrapping_sub(head) as usize;
         if available == 0 {
@@ -333,12 +333,9 @@ impl PacketLoop {
         
         let to_process = available.min(BATCH_SIZE);
         
-        // Read CQEs into batch array
         for i in 0..to_process {
             let idx = (head.wrapping_add(i as u32) & self.cq_mask) as usize;
             let cqe = unsafe { &*self.cqes.add(idx) };
-            
-            // user_data encodes buffer_id, res is bytes received
             let buffer_id = cqe.user_data as u32;
             let len = if cqe.res > 0 { cqe.res as u32 } else { 0 };
             
@@ -349,18 +346,14 @@ impl PacketLoop {
             };
         }
         
-        // Advance head (release semantics for producer visibility)
         unsafe {
-            core::ptr::write_volatile(
-                self.cq_head, 
-                head.wrapping_add(to_process as u32)
+            core::ptr::write_volatile(self.cq_head, head.wrapping_add(to_process as u32)
             );
         }
         
         to_process
     }
 
-    /// Process batch through dispatcher. Straight-line, no branches in hot path.
     #[inline]
     fn process_batch(&mut self, count: usize) {
         self.output.reset();
@@ -370,7 +363,7 @@ impl PacketLoop {
             
             if !packet.data.is_null() && packet.len > 0 {
                 let output_ptr = self.output.record_ptr(i);
-                self.dispatcher.dispatch(packet.data, packet.len, output_ptr);
+                unsafe { self.dispatcher.dispatch(packet.data, packet.len, output_ptr) };
             }
         }
     }
@@ -389,12 +382,10 @@ impl Drop for PacketLoop {
     fn drop(&mut self) {
         unsafe {
             libc::close(self.ring_fd);
-            // Unmap rings (sizes would need to be stored)
         }
     }
 }
 
-/// Registered buffers for zero-copy I/O.
 #[cfg(target_os = "linux")]
 pub struct RegisteredBuffers {
     memory: *mut u8,
@@ -508,8 +499,7 @@ pub enum IoUringError {
     RegisterFailed,
 }
 
-/// Default slow path: count and drop.
-pub fn default_slow_path(packet: *const u8, len: u32, version: u8) {
+pub fn default_slow_path(_packet: *const u8, _len: u32, _version: u8) {
 }
 
 #[cfg(test)]
@@ -530,11 +520,13 @@ mod tests {
         let packet = [1u8, 0, 0, 0]; // version = 1
         let mut output = [0u8; 256];
         
-        let result = dispatcher.dispatch(
-            packet.as_ptr(),
-            packet.len() as u32,
-            output.as_mut_ptr(),
-        );
+        let result = unsafe {
+            dispatcher.dispatch(
+                packet.as_ptr(),
+                packet.len() as u32,
+                output.as_mut_ptr(),
+            )
+        };
         
         assert_eq!(result, DispatchResult::Success);
         assert_eq!(dispatcher.stats().packets_fast, 1);
@@ -548,11 +540,13 @@ mod tests {
         let packet = [42u8, 0, 0, 0]; // version = 42 (unknown)
         let mut output = [0u8; 256];
         
-        let result = dispatcher.dispatch(
-            packet.as_ptr(),
-            packet.len() as u32,
-            output.as_mut_ptr(),
-        );
+        let result = unsafe {
+            dispatcher.dispatch(
+                packet.as_ptr(),
+                packet.len() as u32,
+                output.as_mut_ptr(),
+            )
+        };
         
         assert_eq!(result, DispatchResult::SlowPath);
         assert_eq!(dispatcher.stats().unknown_versions, 1);

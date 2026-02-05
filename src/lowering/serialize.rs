@@ -2,8 +2,8 @@
 //!
 //! JSON export/import for the trust artifact. No external deps.
 
-use crate::lowering::target::{MicroOp, SimdWidth, VReg};
-use crate::lowering::witness::{Witness, WitnessEntry};
+use crate::lowering::target::{MicroOp, SimdWidth};
+use crate::lowering::witness::Witness;
 use crate::semantic_hash::SemanticHash;
 
 pub struct SerializedWitness {

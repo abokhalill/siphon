@@ -60,6 +60,12 @@ impl CoreTelemetry {
     }
 }
 
+impl Default for CoreTelemetry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Global telemetry array.
 pub struct TelemetryArray {
     cores: [CoreTelemetry; MAX_CORES],
@@ -71,7 +77,15 @@ impl TelemetryArray {
             cores: [CoreTelemetry::new(); MAX_CORES],
         }
     }
+}
 
+impl Default for TelemetryArray {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TelemetryArray {
     #[inline]
     pub fn core_mut(&mut self, core_id: usize) -> &mut CoreTelemetry {
         debug_assert!(core_id < MAX_CORES);
@@ -144,11 +158,17 @@ impl AggregateStats {
         }
     }
 
-    pub fn packets_per_second(&self, elapsed_ns: u64, cpu_freq_ghz: f64) -> f64 {
+    pub fn packets_per_second(&self, elapsed_ns: u64, _cpu_freq_ghz: f64) -> f64 {
         if elapsed_ns == 0 {
             return 0.0;
         }
         (self.total_packets as f64) / (elapsed_ns as f64 / 1_000_000_000.0)
+    }
+}
+
+impl Default for AggregateStats {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -256,7 +276,15 @@ impl LatencyHistogram {
     pub fn enable(&mut self) {
         self.enabled = true;
     }
+}
 
+impl Default for LatencyHistogram {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LatencyHistogram {
     pub fn disable(&mut self) {
         self.enabled = false;
     }
@@ -341,9 +369,9 @@ mod tests {
         let p99 = hist.percentile(0.99);
         
         // p50 should be around 100-ish
-        assert!(p50 >= 64 && p50 <= 256);
+        assert!((64..=256).contains(&p50));
         // p99 should be around 1000-ish
-        assert!(p99 >= 512 && p99 <= 2048);
+        assert!((512..=2048).contains(&p99));
     }
 
     #[test]
