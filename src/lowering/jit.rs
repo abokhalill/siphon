@@ -883,7 +883,9 @@ impl LoweringEngine {
     }
 
     /// Scalar store: VReg -> output [r12 + offset].
+    /// Uses MOVNTI for non-temporal hint (bypasses cache, better for streaming).
     fn emit_scalar_store(&self, code: &mut ExecutableBuffer, src: VReg, offset: u32, _scalar_type: ScalarType) -> Result<(), LoweringError> {
+        // Load VReg from stack into RAX
         let stack_offset = -8 * (src.0 as i32 + 1);
         if stack_offset >= -128 {
             code.write(&[0x48, 0x8B, 0x45, stack_offset as u8])?;
@@ -892,10 +894,12 @@ impl LoweringEngine {
             code.write(&stack_offset.to_le_bytes())?;
         }
         
+        // MOVNTI [r12 + offset], RAX — non-temporal store, bypasses cache
+        // 49 0F C3 44 24 <disp8> or 49 0F C3 84 24 <disp32>
         if offset < 128 {
-            code.write(&[0x49, 0x89, 0x44, 0x24, offset as u8])?;
+            code.write(&[0x49, 0x0F, 0xC3, 0x44, 0x24, offset as u8])?;
         } else {
-            code.write(&[0x49, 0x89, 0x84, 0x24])?;
+            code.write(&[0x49, 0x0F, 0xC3, 0x84, 0x24])?;
             code.write(&offset.to_le_bytes())?;
         }
         
