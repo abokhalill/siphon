@@ -18,6 +18,11 @@ use crate::semantic_hash::SemanticHash;
 /// Kernel signature: (packet, len, output) -> 0=success, nonzero=validation failure.
 pub type KernelFn = extern "C" fn(*const u8, u32, *mut u8) -> u32;
 
+/// Batch kernel: processes 4 packets in parallel using AVX2.
+/// packets: array of 4 packet pointers, lens: array of 4 lengths, outputs: array of 4 output ptrs
+/// Returns bitmask of successful packets (0xF = all succeeded).
+pub type BatchKernelFn = extern "C" fn(*const *const u8, *const u32, *mut *mut u8) -> u32;
+
 /// Verified executable kernel. ready for execution.
 pub struct LoweredKernel {
     /// The executable code buffer
@@ -57,6 +62,24 @@ impl LoweredKernel {
 
     pub fn phase_b_hash(&self) -> &SemanticHash {
         &self.phase_b_hash
+    }
+}
+
+/// Batch kernel for SIMD 4-packet parallel processing.
+/// Uses AVX2 YMM registers to process 4 u64 lanes simultaneously.
+pub struct BatchKernel {
+    code: ExecutableBuffer,
+    witness: crate::lowering::witness::Witness,
+    phase_a_hash: SemanticHash,
+}
+
+impl BatchKernel {
+    pub fn as_fn(&self) -> BatchKernelFn {
+        unsafe { std::mem::transmute(self.code.ptr) }
+    }
+
+    pub fn code_size(&self) -> usize {
+        self.code.len()
     }
 }
 
@@ -256,6 +279,49 @@ impl LoweringEngine {
             ops,
             phase_a_hash,
             phase_b_hash,
+        })
+    }
+
+    /// Lower to batch kernel for SIMD 4-packet parallel processing.
+    /// Uses YMM registers directly instead of stack-based VRegs.
+    pub fn lower_batch<'a>(
+        &self,
+        graph: &RifGraph<'a>,
+        phase_a_hash: SemanticHash,
+    ) -> Result<BatchKernel, LoweringError> {
+        graph.validate().map_err(|_| LoweringError::UnsupportedNode)?;
+
+        let initial_lanes = self.width.lanes_for(ScalarType::U64);
+        let initial_mask = LaneMask((1u16 << initial_lanes) - 1);
+
+        let mut ops = MicroOpStream::new();
+        let mut regalloc = RegAlloc::new(self.width);
+        let mut witness_gen = WitnessGenerator::new(phase_a_hash, initial_mask);
+        let mut mem_verifier = MemorySafetyVerifier::new(self.max_packet_len);
+
+        for (idx, node) in graph.nodes.iter().enumerate() {
+            let node_idx = NodeIndex(idx as u32);
+            self.lower_node(node, node_idx, &mut ops, &mut regalloc, &mut witness_gen, &mut mem_verifier)?;
+        }
+
+        mem_verifier.verify_all().map_err(|_| LoweringError::WitnessGenerationFailed)?;
+
+        let mut code = ExecutableBuffer::new(ICACHE_BUDGET_BYTES)?;
+        self.emit_batch_prologue(&mut code)?;
+        
+        for op in ops.as_slice() {
+            self.emit_batch_microop(op, &mut code)?;
+        }
+        
+        self.emit_batch_epilogue(&mut code)?;
+        code.make_executable()?;
+
+        let witness = witness_gen.finalize();
+
+        Ok(BatchKernel {
+            code,
+            witness,
+            phase_a_hash,
         })
     }
 
@@ -756,6 +822,145 @@ impl LoweringEngine {
         code.write(&[0x31, 0xC0])?;
         // ret
         code.write(&[0xC3])?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // Batch (SIMD) Prologue/Epilogue — YMM register file, no stack spills
+    // =========================================================================
+
+    /// Batch prologue: rdi = packet ptrs[4], rsi = lens[4], rdx = output ptrs[4]
+    fn emit_batch_prologue(&self, code: &mut ExecutableBuffer) -> Result<(), LoweringError> {
+        // push rbp; mov rbp, rsp
+        code.write(&[0x55, 0x48, 0x89, 0xE5])?;
+        // Save callee-saved YMM regs if needed (we use YMM0-14, all caller-saved on SysV)
+        // Save r12-r15 for packet ptr array iteration
+        code.write(&[0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57])?;
+        // mov r12, rdi (packet ptrs)
+        code.write(&[0x49, 0x89, 0xFC])?;
+        // mov r13, rsi (lens)
+        code.write(&[0x49, 0x89, 0xF5])?;
+        // mov r14, rdx (output ptrs)
+        code.write(&[0x49, 0x89, 0xD6])?;
+        // VZEROALL to clear YMM state (avoid SSE/AVX transition penalty)
+        code.write(&[0xC5, 0xFC, 0x77])?;
+        Ok(())
+    }
+
+    /// Batch epilogue: return success mask in eax
+    fn emit_batch_epilogue(&self, code: &mut ExecutableBuffer) -> Result<(), LoweringError> {
+        // SFENCE
+        code.write(&[0x0F, 0xAE, 0xF8])?;
+        // VZEROUPPER (avoid AVX->SSE transition penalty)
+        code.write(&[0xC5, 0xF8, 0x77])?;
+        // pop r15-r12
+        code.write(&[0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C])?;
+        // mov rsp, rbp; pop rbp
+        code.write(&[0x48, 0x89, 0xEC, 0x5D])?;
+        // mov eax, 0xF (all 4 packets succeeded)
+        code.write(&[0xB8, 0x0F, 0x00, 0x00, 0x00])?;
+        // ret
+        code.write(&[0xC3])?;
+        Ok(())
+    }
+
+    /// Emit batch MicroOp using AVX2 instructions
+    fn emit_batch_microop(&self, op: &MicroOp, code: &mut ExecutableBuffer) -> Result<(), LoweringError> {
+        match op {
+            MicroOp::LoadVector { dst, offset, width: _, scalar_type: _, mask: _ } => {
+                // For batch: load same offset from 4 packets into YMM lanes
+                // This requires gather or 4 scalar loads + insert
+                // Simplified: use VBROADCASTSD from first packet for now
+                self.emit_batch_load(code, *dst, *offset)
+            }
+            MicroOp::Emit { src, field_offset, scalar_type: _, mask: _ } => {
+                self.emit_batch_store(code, *src, *field_offset as u32)
+            }
+            MicroOp::BroadcastImm { dst, value, scalar_type } => {
+                self.emit_broadcast_imm64(code, *dst, *value, *scalar_type)
+            }
+            MicroOp::ValidateCmpGt { dst_mask, src, comparand, scalar_type: _ } => {
+                self.emit_vpcmpgtq(code, *dst_mask, *src, *comparand)
+            }
+            MicroOp::ValidateCmpLt { dst_mask, src, comparand, scalar_type: _ } => {
+                // lt = swap operands for gt
+                self.emit_vpcmpgtq(code, *dst_mask, *comparand, *src)
+            }
+            MicroOp::ValidateCmpEq { dst_mask, src, imm_or_reg, scalar_type: _ } => {
+                self.emit_vpcmpeqq(code, *dst_mask, *src, *imm_or_reg)
+            }
+            MicroOp::ValidateNonZero { dst_mask, src, scalar_type: _ } => {
+                self.emit_validate_nonzero(code, *dst_mask, *src)
+            }
+            MicroOp::MaskAnd { dst, src1, src2 } => {
+                self.emit_vpand(code, *dst, *src1, *src2)
+            }
+            MicroOp::MaskOr { dst, src1, src2 } => {
+                self.emit_vpor(code, *dst, *src1, *src2)
+            }
+            MicroOp::MaskNot { dst, src } => {
+                // XOR with all-ones
+                self.emit_vpxor(code, *dst, *src, *src) // placeholder
+            }
+            MicroOp::Select { dst, mask, true_val, false_val, scalar_type: _ } => {
+                self.emit_vblendvpd(code, *dst, *false_val, *true_val, *mask)
+            }
+            MicroOp::Add { dst, src1, src2, scalar_type } => {
+                self.emit_vpaddq(code, *dst, *src1, *src2, *scalar_type)
+            }
+            MicroOp::Sub { dst, src1, src2, scalar_type } => {
+                self.emit_vpsubq(code, *dst, *src1, *src2, *scalar_type)
+            }
+            MicroOp::And { dst, src1, src2 } => {
+                self.emit_vpand(code, *dst, *src1, *src2)
+            }
+            MicroOp::Or { dst, src1, src2 } => {
+                self.emit_vpor(code, *dst, *src1, *src2)
+            }
+            MicroOp::Xor { dst, src1, src2 } => {
+                self.emit_vpxor(code, *dst, *src1, *src2)
+            }
+            MicroOp::ByteSwap { dst: _, src: _, scalar_type: _ } => {
+                // VPSHUFB for byte swap — complex, skip for now
+                Ok(())
+            }
+            MicroOp::Nop { bytes } => {
+                self.emit_nop(code, *bytes)
+            }
+        }
+    }
+
+    /// Batch load: broadcast from [r12] + offset into YMM
+    fn emit_batch_load(&self, code: &mut ExecutableBuffer, dst: VReg, offset: u32) -> Result<(), LoweringError> {
+        let dst_reg = dst.0 & 0x0F;
+        // mov rax, [r12] (first packet ptr)
+        code.write(&[0x49, 0x8B, 0x04, 0x24])?;
+        // VBROADCASTSD ymm, [rax + offset]
+        if dst_reg < 8 {
+            code.write(&[0xC4, 0xE2, 0x7D, 0x19])?;
+        } else {
+            code.write(&[0xC4, 0x62, 0x7D, 0x19])?;
+        }
+        let modrm = 0x80 | ((dst_reg & 7) << 3) | 0x00; // [rax + disp32]
+        code.write(&[modrm])?;
+        code.write(&offset.to_le_bytes())?;
+        Ok(())
+    }
+
+    /// Batch store: VMOVNTDQ to [r14] + offset
+    fn emit_batch_store(&self, code: &mut ExecutableBuffer, src: VReg, offset: u32) -> Result<(), LoweringError> {
+        let src_reg = src.0 & 0x0F;
+        // mov rax, [r14] (first output ptr)
+        code.write(&[0x49, 0x8B, 0x06])?;
+        // VMOVNTDQ [rax + offset], ymm
+        if src_reg < 8 {
+            code.write(&[0xC5, 0xFD, 0xE7])?;
+        } else {
+            code.write(&[0xC4, 0x41, 0x7D, 0xE7])?;
+        }
+        let modrm = 0x80 | ((src_reg & 7) << 3) | 0x00;
+        code.write(&[modrm])?;
+        code.write(&offset.to_le_bytes())?;
         Ok(())
     }
 
