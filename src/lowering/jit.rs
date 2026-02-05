@@ -1108,6 +1108,7 @@ impl LoweringEngine {
     }
 
     /// VMOVDQU [rdx + disp32], ymm
+    #[allow(dead_code)]
     fn emit_vmovdqu_store(&self, code: &mut ExecutableBuffer, src: VReg, offset: u32) -> Result<(), LoweringError> {
         let src_reg = src.0 & 0x0F;
         
@@ -1129,6 +1130,7 @@ impl LoweringEngine {
     }
 
     /// Broadcast imm64 to all lanes.
+    #[allow(dead_code)]
     fn emit_broadcast_imm64(&self, code: &mut ExecutableBuffer, dst: VReg, value: u64, _scalar_type: ScalarType) -> Result<(), LoweringError> {
         let dst_reg = dst.0 & 0x0F;
         
@@ -1157,6 +1159,7 @@ impl LoweringEngine {
     }
 
     /// VPCMPGTQ ymm, ymm, ymm
+    #[allow(dead_code)]
     fn emit_vpcmpgtq(&self, code: &mut ExecutableBuffer, dst: VReg, src1: VReg, src2: VReg) -> Result<(), LoweringError> {
         let dst_reg = dst.0 & 0x0F;
         let src1_reg = src1.0 & 0x0F;
@@ -1180,6 +1183,7 @@ impl LoweringEngine {
     }
 
     /// VPCMPEQQ ymm, ymm, ymm
+    #[allow(dead_code)]
     fn emit_vpcmpeqq(&self, code: &mut ExecutableBuffer, dst: VReg, src1: VReg, src2: VReg) -> Result<(), LoweringError> {
         let dst_reg = dst.0 & 0x0F;
         let src1_reg = src1.0 & 0x0F;
@@ -1202,6 +1206,7 @@ impl LoweringEngine {
     }
 
     /// Validate nonzero using YMM15 as scratch zero vector.
+    #[allow(dead_code)]
     fn emit_validate_nonzero(&self, code: &mut ExecutableBuffer, dst: VReg, src: VReg) -> Result<(), LoweringError> {
         code.write(&[0xC4, 0x41, 0x05])?; // R=0, X=1, B=0, mmmmm=1, W=0, vvvv=0000, L=1, pp=01
         code.write(&[0xEF])?;
@@ -1211,6 +1216,7 @@ impl LoweringEngine {
     }
 
     /// VPAND ymm, ymm, ymm
+    #[allow(dead_code)]
     fn emit_vpand(&self, code: &mut ExecutableBuffer, dst: VReg, src1: VReg, src2: VReg) -> Result<(), LoweringError> {
         let dst_reg = dst.0 & 0x0F;
         let src1_reg = src1.0 & 0x0F;
@@ -1237,6 +1243,7 @@ impl LoweringEngine {
     }
 
     /// VPOR ymm, ymm, ymm
+    #[allow(dead_code)]
     fn emit_vpor(&self, code: &mut ExecutableBuffer, dst: VReg, src1: VReg, src2: VReg) -> Result<(), LoweringError> {
         let dst_reg = dst.0 & 0x0F;
         let src1_reg = src1.0 & 0x0F;
@@ -1263,6 +1270,7 @@ impl LoweringEngine {
     }
 
     /// VPXOR ymm, ymm, ymm
+    #[allow(dead_code)]
     fn emit_vpxor(&self, code: &mut ExecutableBuffer, dst: VReg, src1: VReg, src2: VReg) -> Result<(), LoweringError> {
         let dst_reg = dst.0 & 0x0F;
         let src1_reg = src1.0 & 0x0F;
@@ -1289,6 +1297,7 @@ impl LoweringEngine {
     }
 
     /// VBLENDVPD ymm, ymm, ymm, ymm
+    #[allow(dead_code)]
     fn emit_vblendvpd(&self, code: &mut ExecutableBuffer, dst: VReg, src1: VReg, src2: VReg, mask: VReg) -> Result<(), LoweringError> {
         let dst_reg = dst.0 & 0x0F;
         let src1_reg = src1.0 & 0x0F;
@@ -1316,6 +1325,7 @@ impl LoweringEngine {
     }
 
     /// VPADDQ ymm, ymm, ymm
+    #[allow(dead_code)]
     fn emit_vpaddq(&self, code: &mut ExecutableBuffer, dst: VReg, src1: VReg, src2: VReg, _scalar_type: ScalarType) -> Result<(), LoweringError> {
         let dst_reg = dst.0 & 0x0F;
         let src1_reg = src1.0 & 0x0F;
@@ -1342,6 +1352,7 @@ impl LoweringEngine {
     }
 
     /// VPSUBQ ymm, ymm, ymm
+    #[allow(dead_code)]
     fn emit_vpsubq(&self, code: &mut ExecutableBuffer, dst: VReg, src1: VReg, src2: VReg, _scalar_type: ScalarType) -> Result<(), LoweringError> {
         let dst_reg = dst.0 & 0x0F;
         let src1_reg = src1.0 & 0x0F;
