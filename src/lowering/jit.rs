@@ -742,11 +742,17 @@ impl LoweringEngine {
 
     /// Emit function epilogue
     fn emit_epilogue(&self, code: &mut ExecutableBuffer) -> Result<(), LoweringError> {
+        // SFENCE — flush non-temporal stores before returning
+        code.write(&[0x0F, 0xAE, 0xF8])?;
+        // pop r12
         code.write(&[0x41, 0x5C])?;
+        // mov rsp, rbp
         code.write(&[0x48, 0x89, 0xEC])?;
+        // pop rbp
         code.write(&[0x5D])?;
         // xor eax, eax  ; return 0 (success)
         code.write(&[0x31, 0xC0])?;
+        // ret
         code.write(&[0xC3])?;
         Ok(())
     }
