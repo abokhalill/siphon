@@ -62,6 +62,14 @@ fn main() -> ExitCode {
             }
             cmd_bench(&args[2])
         }
+        "bench-batch" => {
+            if args.len() < 3 {
+                eprintln!("Error: missing protocol file");
+                eprintln!("Usage: siphon bench-batch <protocol>");
+                return ExitCode::from(1);
+            }
+            cmd_bench_batch(&args[2])
+        }
         "help" | "--help" | "-h" => {
             print_usage();
             ExitCode::SUCCESS
@@ -891,4 +899,54 @@ fn validate_rif(graph: &RifGraph) -> ValidationResult {
     }
     
     result
+}
+
+// ============================================================================
+// Batch Benchmark (SIMD 4-packet parallel)
+// ============================================================================
+
+fn cmd_bench_batch(protocol_path: &str) -> ExitCode {
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("  SIPHON BATCH BENCH — SIMD 4-Packet Parallel");
+    println!("═══════════════════════════════════════════════════════════════");
+    println!();
+    println!("Protocol: {}", protocol_path);
+    println!();
+
+    let protocol = match load_protocol(protocol_path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Error loading protocol: {}", e);
+            return ExitCode::from(1);
+        }
+    };
+
+    let graph = protocol.to_rif_graph();
+    let sha = match compute_semantic_hash(&graph) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("Error computing semantic hash: {:?}", e);
+            return ExitCode::from(1);
+        }
+    };
+
+    let engine = LoweringEngine::new(SimdWidth::Avx2, graph.max_packet_length);
+
+    let batch_kernel = match engine.lower_batch(&graph, sha) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("Batch lowering error: {:?}", e);
+            return ExitCode::from(1);
+        }
+    };
+
+    println!("┌─────────────────────────────────────────────────────────────┐");
+    println!("│ BATCH KERNEL COMPILED                                       │");
+    println!("├─────────────────────────────────────────────────────────────┤");
+    println!("│ Code Size:             {:>5} bytes                          │", batch_kernel.code_size());
+    println!("└─────────────────────────────────────────────────────────────┘");
+    println!();
+    println!("✓ Batch kernel ready for SIMD 4-packet parallel processing");
+
+    ExitCode::SUCCESS
 }
