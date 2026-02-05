@@ -64,7 +64,7 @@ Siphon treats protocol definitions as the source of truth—not just for documen
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         PROTOCOL SPECIFICATION                      │
+│                     PROTOCOL SPECIFICATION                          │
 │                      (market_data.siphon)                           │
 └─────────────────────────────────────────────────────────────────────┘
                                    │

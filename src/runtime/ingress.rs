@@ -191,7 +191,8 @@ pub enum DispatchResult {
     InvalidPacket,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct PacketDesc {
     pub data: *const u8,
     pub len: u32,
@@ -204,9 +205,15 @@ pub struct PacketLoop {
     ring_fd: i32,
     cq_ring: *mut u8,
     sq_ring: *mut u8,
+    // CQ ring state for lockless polling
+    cq_head: *mut u32,
+    cq_tail: *mut u32,
+    cq_mask: u32,
+    cqes: *mut IoUringCqe,
     buffers: RegisteredBuffers,
     dispatcher: VersionDispatcher,
     output: OutputBuffer,
+    batch: [PacketDesc; BATCH_SIZE],
     batch_count: u64,
 }
 
@@ -263,13 +270,24 @@ impl PacketLoop {
         let buffers = RegisteredBuffers::new(buffer_count, buffer_size)?;
         buffers.register(ring_fd)?;
         
+        // Extract CQ ring pointers from mapped memory
+        let cq_head = cq_ring.add(params.cq_off.head as usize) as *mut u32;
+        let cq_tail = cq_ring.add(params.cq_off.tail as usize) as *mut u32;
+        let cq_mask = *(cq_ring.add(params.cq_off.ring_mask as usize) as *const u32);
+        let cqes = cq_ring.add(params.cq_off.cqes as usize) as *mut IoUringCqe;
+        
         Ok(Self {
             ring_fd,
             cq_ring,
             sq_ring,
+            cq_head,
+            cq_tail,
+            cq_mask,
+            cqes,
             buffers,
             dispatcher: VersionDispatcher::new(slow_path),
             output: OutputBuffer::new(),
+            batch: [PacketDesc { data: ptr::null(), len: 0, buffer_id: 0 }; BATCH_SIZE],
             batch_count: 0,
         })
     }
@@ -297,29 +315,64 @@ impl PacketLoop {
         }
     }
 
+    /// Poll CQ for completions. Lockless, no syscalls.
     #[inline]
     fn poll_completions(&mut self) -> usize {
-        // Placeholder - real impl reads from mapped CQ ring with atomics
-        0
+        // Atomic load of tail (producer), relaxed load of head (we own it)
+        let tail = unsafe { 
+            core::ptr::read_volatile(self.cq_tail) 
+        };
+        let head = unsafe { 
+            core::ptr::read_volatile(self.cq_head) 
+        };
+        
+        let available = tail.wrapping_sub(head) as usize;
+        if available == 0 {
+            return 0;
+        }
+        
+        let to_process = available.min(BATCH_SIZE);
+        
+        // Read CQEs into batch array
+        for i in 0..to_process {
+            let idx = (head.wrapping_add(i as u32) & self.cq_mask) as usize;
+            let cqe = unsafe { &*self.cqes.add(idx) };
+            
+            // user_data encodes buffer_id, res is bytes received
+            let buffer_id = cqe.user_data as u32;
+            let len = if cqe.res > 0 { cqe.res as u32 } else { 0 };
+            
+            self.batch[i] = PacketDesc {
+                data: self.buffers.buffer_ptr(buffer_id),
+                len,
+                buffer_id,
+            };
+        }
+        
+        // Advance head (release semantics for producer visibility)
+        unsafe {
+            core::ptr::write_volatile(
+                self.cq_head, 
+                head.wrapping_add(to_process as u32)
+            );
+        }
+        
+        to_process
     }
 
+    /// Process batch through dispatcher. Straight-line, no branches in hot path.
     #[inline]
     fn process_batch(&mut self, count: usize) {
         self.output.reset();
         
-        for i in 0..count.min(BATCH_SIZE) {
-            let packet = PacketDesc {
-                data: ptr::null(),
-                len: 0,
-                buffer_id: 0,
-            };
+        for i in 0..count {
+            let packet = &self.batch[i];
             
             if !packet.data.is_null() && packet.len > 0 {
                 let output_ptr = self.output.record_ptr(i);
                 self.dispatcher.dispatch(packet.data, packet.len, output_ptr);
             }
         }
-        
     }
 
     pub fn stats(&self) -> &DispatchStats {
