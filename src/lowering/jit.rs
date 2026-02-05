@@ -722,19 +722,21 @@ impl LoweringEngine {
         // x86-64 SysV ABI:
         // rdi = packet ptr, rsi = packet len, rdx = output ptr
         
-        // We need stack space for our virtual register file
-        // Allocate 16 * 8 = 128 bytes for 16 VRegs
-        // Stack layout: [rbp-8] = VReg0, [rbp-16] = VReg1, etc.
+        // PREFETCHT0 [rdi] — bring first cache line into L1 while we set up
+        code.write(&[0x0F, 0x18, 0x07])?;
+        // PREFETCHT0 [rdi+64] — second cache line for larger packets
+        code.write(&[0x0F, 0x18, 0x47, 0x40])?;
         
+        // push rbp
         code.write(&[0x55])?;
+        // mov rbp, rsp
         code.write(&[0x48, 0x89, 0xE5])?;
-        // sub rsp, 128 (0x80)
+        // sub rsp, 128 (0x80) — 16 VRegs * 8 bytes
         code.write(&[0x48, 0x83, 0xEC, 0x80])?;
         
-        // Save rdx (output ptr) to r12 (callee-saved) so we can use rdx
-        // push r12
+        // push r12 (callee-saved)
         code.write(&[0x41, 0x54])?;
-        // mov r12, rdx
+        // mov r12, rdx (save output ptr)
         code.write(&[0x49, 0x89, 0xD4])?;
         
         Ok(())
