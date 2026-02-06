@@ -760,7 +760,8 @@ impl LoweringEngine {
         if min_packet_len > 0 {
             code.write(&[0x81, 0xFE])?;           // CMP ESI, imm32
             code.write(&(min_packet_len as u32).to_le_bytes())?;
-            code.write(&[0x72, 0x04])?;           // JB +4 (to early exit)
+            code.write(&[0x72, 0x07])?;           // JB +7 (to early exit, skip LFENCE+JMP)
+            code.write(&[0x0F, 0xAE, 0xE8])?;     // LFENCE - Spectre mitigation after branch
             code.write(&[0xEB, 0x06])?;           // JMP +6 (skip early exit)
             // Early exit: return 2 (bounds error)
             code.write(&[0xB8, 0x02, 0x00, 0x00, 0x00])?;  // MOV EAX, 2
@@ -834,7 +835,8 @@ impl LoweringEngine {
         if min_packet_len > 0 {
             code.write(&[0x81, 0xFE])?;           // CMP ESI, imm32
             code.write(&(min_packet_len as u32).to_le_bytes())?;
-            code.write(&[0x72, 0x04])?;           // JB +4 (to early exit)
+            code.write(&[0x72, 0x07])?;           // JB +7 (to early exit, skip LFENCE+JMP)
+            code.write(&[0x0F, 0xAE, 0xE8])?;     // LFENCE - Spectre mitigation after branch
             code.write(&[0xEB, 0x06])?;           // JMP +6 (skip early exit)
             code.write(&[0xB8, 0x00, 0x00, 0x00, 0x00])?;  // MOV EAX, 0 (no packets succeeded)
             code.write(&[0xC3])?;                 // RET
@@ -1029,8 +1031,10 @@ impl LoweringEngine {
             self.emit_load_vreg_to_rcx(code, mask_reg)?;
             code.write(&[0x48, 0x85, 0xC9])?;  // TEST RCX, RCX
             code.write(&[0x74])?;              // JZ rel8 (skip store)
-            let skip_offset = self.store_instruction_size(offset, scalar_type) + 7;
+            // +3 for LFENCE after the branch
+            let skip_offset = self.store_instruction_size(offset, scalar_type) + 7 + 3;
             code.write(&[skip_offset as u8])?;
+            code.write(&[0x0F, 0xAE, 0xE8])?;  // LFENCE - Spectre mitigation
         }
 
         let stack_offset = -8 * (src.0 as i32 + 1);
