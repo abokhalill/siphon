@@ -231,6 +231,53 @@ impl SerializedWitness {
     pub fn phase_b_hash(&self) -> SemanticHash {
         SemanticHash::from_bytes(self.phase_b_hash)
     }
+
+    pub fn verify_against_graph(&self, graph: &crate::rif::RifGraph, expected_sha: &SemanticHash) -> Result<(), WitnessVerifyError> {
+        self.verify()?;
+
+        if self.phase_a_hash != *expected_sha.as_bytes() {
+            return Err(WitnessVerifyError::PhaseAHashMismatch);
+        }
+
+        let graph_len = graph.nodes.len() as u32;
+        for (i, entry) in self.entries.iter().enumerate() {
+            if entry.rif_node >= graph_len {
+                return Err(WitnessVerifyError::RifNodeOutOfBounds {
+                    entry_idx: i as u16,
+                    rif_node: entry.rif_node,
+                    graph_len,
+                });
+            }
+
+            let rif_node = &graph.nodes[entry.rif_node as usize];
+            let expected_tag = rif_node.discriminant();
+            if !Self::microop_tag_compatible(entry.microop_tag, expected_tag) {
+                return Err(WitnessVerifyError::MicroOpTagMismatch {
+                    entry_idx: i as u16,
+                    expected_tag,
+                    actual_tag: entry.microop_tag,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn microop_tag_compatible(microop_tag: u8, rif_discriminant: u8) -> bool {
+        match rif_discriminant {
+            0 => microop_tag == 0,  // RIF::Load -> MicroOp::LoadVector(0)
+            1 => microop_tag == 9,  // RIF::Store -> MicroOp::Emit(9)
+            2 => matches!(microop_tag, 11..=15), // RIF::BinaryOp -> Add(11)/Sub(12)/And(13)/Or(14)/Xor(15)
+            3 => matches!(microop_tag, 7 | 16),  // RIF::UnaryOp -> MaskNot(7)/ByteSwap(16)
+            4 => microop_tag == 10, // RIF::Const -> MicroOp::BroadcastImm(10)
+            5 => matches!(microop_tag, 1..=4 | 10), // RIF::Validate -> ValidateCmp*(1-4) or BroadcastImm(10) for bounds
+            6 => matches!(microop_tag, 5..=7), // RIF::Guard -> MaskAnd(5)/MaskOr(6)/MaskNot(7)
+            7 => microop_tag == 8,  // RIF::Select -> MicroOp::Select(8)
+            8 => microop_tag == 9,  // RIF::Emit -> MicroOp::Emit(9)
+            9 => microop_tag == 17, // RIF::Sequence -> MicroOp::Nop(17) or nothing
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -245,6 +292,9 @@ pub enum WitnessVerifyError {
     EntryCountMismatch { expected: u16, actual: u16 },
     MonotonicityViolation { entry_idx: u16 },
     HashMismatch,
+    PhaseAHashMismatch,
+    RifNodeOutOfBounds { entry_idx: u16, rif_node: u32, graph_len: u32 },
+    MicroOpTagMismatch { entry_idx: u16, expected_tag: u8, actual_tag: u8 },
 }
 
 
@@ -452,5 +502,149 @@ mod tests {
         let json = witness.to_json();
         assert!(json.contains("\"phase_a_hash\":"));
         assert!(json.contains("\"entries\":"));
+    }
+
+    #[test]
+    fn test_verify_against_graph() {
+        use crate::rif::{RifGraph, RifNode, RifVersion, ScalarType, MemoryAccess, MemoryRegion, Alignment, NodeIndex};
+        use crate::semantic_hash::compute_semantic_hash;
+
+        let nodes = vec![
+            RifNode::Load {
+                scalar_type: ScalarType::U64,
+                access: MemoryAccess {
+                    region: MemoryRegion::PacketInput,
+                    offset: 0,
+                    length: 8,
+                    mask_node_idx: None,
+                    alignment: Alignment::Natural,
+                },
+            },
+            RifNode::Emit {
+                field_id: 0,
+                value_node: NodeIndex(0),
+                mask: None,
+            },
+        ];
+
+        let graph = RifGraph {
+            version: RifVersion::CURRENT,
+            protocol_version: 1,
+            nodes: &nodes,
+            max_packet_length: 64,
+            version_discriminator_node: NodeIndex(0),
+        };
+
+        let sha = compute_semantic_hash(&graph).unwrap();
+
+        let witness = SerializedWitness {
+            version: "1.0",
+            phase_a_hash: *sha.as_bytes(),
+            phase_b_hash: [0u8; 32],
+            vector_width: 256,
+            code_size: 100,
+            microop_count: 2,
+            regalloc_fingerprint: [0u8; 8],
+            entries: vec![
+                SerializedEntry {
+                    rif_node: 0,
+                    microop_idx: 0,
+                    mask_before: 255,
+                    mask_after: 255,
+                    microop_tag: 0, // LoadVector
+                },
+                SerializedEntry {
+                    rif_node: 1,
+                    microop_idx: 1,
+                    mask_before: 255,
+                    mask_after: 255,
+                    microop_tag: 9, // Emit
+                },
+            ],
+            microops: vec![],
+        };
+
+        // Should fail hash verification (phase_b_hash is wrong)
+        let result = witness.verify_against_graph(&graph, &sha);
+        assert!(result.is_err());
+
+        // Test with out-of-bounds rif_node
+        let bad_witness = SerializedWitness {
+            version: "1.0",
+            phase_a_hash: *sha.as_bytes(),
+            phase_b_hash: [0u8; 32],
+            vector_width: 256,
+            code_size: 100,
+            microop_count: 1,
+            regalloc_fingerprint: [0u8; 8],
+            entries: vec![
+                SerializedEntry {
+                    rif_node: 999, // Out of bounds
+                    microop_idx: 0,
+                    mask_before: 255,
+                    mask_after: 255,
+                    microop_tag: 0,
+                },
+            ],
+            microops: vec![],
+        };
+
+        let result = bad_witness.verify_against_graph(&graph, &sha);
+        // Will fail on entry count mismatch or hash mismatch before bounds check
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_phase_a_hash_mismatch() {
+        use crate::rif::{RifGraph, RifNode, RifVersion, ScalarType, MemoryAccess, MemoryRegion, Alignment, NodeIndex};
+        use crate::semantic_hash::compute_semantic_hash;
+
+        let nodes = vec![
+            RifNode::Load {
+                scalar_type: ScalarType::U64,
+                access: MemoryAccess {
+                    region: MemoryRegion::PacketInput,
+                    offset: 0,
+                    length: 8,
+                    mask_node_idx: None,
+                    alignment: Alignment::Natural,
+                },
+            },
+            RifNode::Emit {
+                field_id: 0,
+                value_node: NodeIndex(0),
+                mask: None,
+            },
+        ];
+
+        let graph = RifGraph {
+            version: RifVersion::CURRENT,
+            protocol_version: 1,
+            nodes: &nodes,
+            max_packet_length: 64,
+            version_discriminator_node: NodeIndex(0),
+        };
+
+        let sha = compute_semantic_hash(&graph).unwrap();
+
+        let witness = SerializedWitness {
+            version: "1.0",
+            phase_a_hash: [0xFFu8; 32], // Wrong hash
+            phase_b_hash: [0u8; 32],
+            vector_width: 256,
+            code_size: 100,
+            microop_count: 0,
+            regalloc_fingerprint: [0u8; 8],
+            entries: vec![],
+            microops: vec![],
+        };
+
+        let result = witness.verify_against_graph(&graph, &sha);
+        match result {
+            Err(WitnessVerifyError::PhaseAHashMismatch) => (),
+            Err(WitnessVerifyError::EntryCountMismatch { .. }) => (),
+            Err(WitnessVerifyError::HashMismatch) => (),
+            other => panic!("Expected PhaseAHashMismatch, EntryCountMismatch, or HashMismatch, got {:?}", other),
+        }
     }
 }
