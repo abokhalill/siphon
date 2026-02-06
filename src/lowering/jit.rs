@@ -247,6 +247,8 @@ impl LoweringEngine {
 
         mem_verifier.verify_all().map_err(|_| LoweringError::WitnessGenerationFailed)?;
 
+        let final_mask = self.find_final_mask(ops.as_slice());
+
         let mut code = ExecutableBuffer::new(ICACHE_BUDGET_BYTES)?;
         self.emit_prologue(&mut code)?;
         
@@ -254,7 +256,7 @@ impl LoweringEngine {
             self.emit_microop(op, &mut code)?;
         }
         
-        self.emit_epilogue(&mut code)?;
+        self.emit_epilogue(&mut code, final_mask)?;
         code.make_executable()?;
 
         let witness = witness_gen.finalize();
@@ -757,13 +759,40 @@ impl LoweringEngine {
         Ok(())
     }
 
-    fn emit_epilogue(&self, code: &mut ExecutableBuffer) -> Result<(), LoweringError> {
+    fn find_final_mask(&self, ops: &[MicroOp]) -> Option<VReg> {
+        for op in ops.iter().rev() {
+            if let MicroOp::Emit { mask, .. } = op {
+                if mask.is_some() {
+                    return *mask;
+                }
+            }
+        }
+        None
+    }
+
+    fn emit_epilogue(&self, code: &mut ExecutableBuffer, final_mask: Option<VReg>) -> Result<(), LoweringError> {
         code.write(&[0x0F, 0xAE, 0xF8])?;  // SFENCE
         code.write(&[0x41, 0x5C])?;        // pop r12
         code.write(&[0x48, 0x89, 0xEC])?;  // mov rsp, rbp
         code.write(&[0x5D])?;              // pop rbp
-        code.write(&[0x31, 0xC0])?;        // xor eax, eax
+
+        if let Some(mask_reg) = final_mask {
+            self.emit_load_vreg_to_rax_epilogue(code, mask_reg)?;
+            code.write(&[0x48, 0x85, 0xC0])?;  // TEST RAX, RAX
+            code.write(&[0x0F, 0x94, 0xC0])?;  // SETZ AL (1 if mask==0, 0 if mask!=0)
+            code.write(&[0x0F, 0xB6, 0xC0])?;  // MOVZX EAX, AL
+        } else {
+            code.write(&[0x31, 0xC0])?;        // xor eax, eax (always success if no guards)
+        }
+
         code.write(&[0xC3])?;              // ret
+        Ok(())
+    }
+
+    fn emit_load_vreg_to_rax_epilogue(&self, code: &mut ExecutableBuffer, src: VReg) -> Result<(), LoweringError> {
+        let stack_offset = -8 * (src.0 as i32 + 1);
+        code.write(&[0x48, 0x8B, 0x85])?;
+        code.write(&stack_offset.to_le_bytes())?;
         Ok(())
     }
 
@@ -879,8 +908,8 @@ impl LoweringEngine {
             MicroOp::LoadVector { dst, offset, width: _, scalar_type, mask: _ } => {
                 self.emit_scalar_load(code, *dst, *offset, *scalar_type)
             }
-            MicroOp::Emit { src, field_offset, scalar_type, mask: _ } => {
-                self.emit_scalar_store(code, *src, *field_offset as u32, *scalar_type)
+            MicroOp::Emit { src, field_offset, scalar_type, mask } => {
+                self.emit_scalar_store(code, *src, *field_offset as u32, *scalar_type, *mask)
             }
             MicroOp::BroadcastImm { dst, value, scalar_type: _ } => {
                 self.emit_scalar_const(code, *dst, *value)
@@ -952,7 +981,15 @@ impl LoweringEngine {
         Ok(())
     }
 
-    fn emit_scalar_store(&self, code: &mut ExecutableBuffer, src: VReg, offset: u32, _scalar_type: ScalarType) -> Result<(), LoweringError> {
+    fn emit_scalar_store(&self, code: &mut ExecutableBuffer, src: VReg, offset: u32, _scalar_type: ScalarType, mask: Option<VReg>) -> Result<(), LoweringError> {
+        if let Some(mask_reg) = mask {
+            self.emit_load_vreg_to_rcx(code, mask_reg)?;
+            code.write(&[0x48, 0x85, 0xC9])?;  // TEST RCX, RCX
+            code.write(&[0x74])?;              // JZ rel8 (skip store)
+            let skip_offset = if offset < 128 { 10u8 } else { 17u8 };
+            code.write(&[skip_offset])?;
+        }
+
         let stack_offset = -8 * (src.0 as i32 + 1);
         if stack_offset >= -128 {
             code.write(&[0x48, 0x8B, 0x45, stack_offset as u8])?;
