@@ -250,11 +250,10 @@ impl SerializedWitness {
             }
 
             let rif_node = &graph.nodes[entry.rif_node as usize];
-            let expected_tag = rif_node.discriminant();
-            if !Self::microop_tag_compatible(entry.microop_tag, expected_tag) {
+            if !rif_node.is_microop_tag_valid(entry.microop_tag) {
                 return Err(WitnessVerifyError::MicroOpTagMismatch {
                     entry_idx: i as u16,
-                    expected_tag,
+                    expected_tag: rif_node.discriminant(),
                     actual_tag: entry.microop_tag,
                 });
             }
@@ -263,21 +262,6 @@ impl SerializedWitness {
         Ok(())
     }
 
-    fn microop_tag_compatible(microop_tag: u8, rif_discriminant: u8) -> bool {
-        match rif_discriminant {
-            0 => microop_tag == 0,  // RIF::Load -> MicroOp::LoadVector(0)
-            1 => microop_tag == 9,  // RIF::Store -> MicroOp::Emit(9)
-            2 => matches!(microop_tag, 11..=15), // RIF::BinaryOp -> Add(11)/Sub(12)/And(13)/Or(14)/Xor(15)
-            3 => matches!(microop_tag, 7 | 16),  // RIF::UnaryOp -> MaskNot(7)/ByteSwap(16)
-            4 => microop_tag == 10, // RIF::Const -> MicroOp::BroadcastImm(10)
-            5 => matches!(microop_tag, 1..=4 | 10), // RIF::Validate -> ValidateCmp*(1-4) or BroadcastImm(10) for bounds
-            6 => matches!(microop_tag, 5..=7), // RIF::Guard -> MaskAnd(5)/MaskOr(6)/MaskNot(7)
-            7 => microop_tag == 8,  // RIF::Select -> MicroOp::Select(8)
-            8 => microop_tag == 9,  // RIF::Emit -> MicroOp::Emit(9)
-            9 => microop_tag == 17, // RIF::Sequence -> MicroOp::Nop(17) or nothing
-            _ => false,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -289,6 +289,32 @@ impl RifNode {
             RifNode::Sequence { .. } => 9,
         }
     }
+
+    /// Returns the set of valid MicroOp discriminants for this RifNode type.
+    /// SINGLE SOURCE OF TRUTH for RifNode -> MicroOp compatibility.
+    /// MicroOp discriminants: LoadVector=0, ValidateCmpEq=1, ValidateCmpGt=2, ValidateCmpLt=3,
+    /// ValidateNonZero=4, MaskAnd=5, MaskOr=6, MaskNot=7, Select=8, Emit=9, BroadcastImm=10,
+    /// Add=11, Sub=12, And=13, Or=14, Xor=15, ByteSwap=16, Nop=17
+    pub const fn valid_microop_tags(&self) -> &'static [u8] {
+        match self {
+            RifNode::Load { .. } => &[0],                    // LoadVector
+            RifNode::Store { .. } => &[9],                   // Emit (store to output)
+            RifNode::BinaryOp { .. } => &[1, 2, 3, 11, 12, 13, 14, 15], // ValidateCmp*, Add, Sub, And, Or, Xor
+            RifNode::UnaryOp { .. } => &[7, 16],             // MaskNot, ByteSwap
+            RifNode::Const { .. } => &[10],                  // BroadcastImm
+            RifNode::Validate { .. } => &[1, 2, 3, 4, 5, 10, 13], // ValidateCmp*, MaskAnd, BroadcastImm, And
+            RifNode::Guard { .. } => &[5, 6, 7],             // MaskAnd, MaskOr, MaskNot
+            RifNode::Select { .. } => &[8],                  // Select
+            RifNode::Emit { .. } => &[9],                    // Emit
+            RifNode::Sequence { .. } => &[17],               // Nop
+        }
+    }
+
+    /// Check if a MicroOp tag is valid for this RifNode type.
+    #[inline]
+    pub fn is_microop_tag_valid(&self, tag: u8) -> bool {
+        self.valid_microop_tags().contains(&tag)
+    }
 }
 
 /// Complete RIF graph. DAG of nodes, must have ≥1 Emit, no forward refs.

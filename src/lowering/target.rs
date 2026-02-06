@@ -211,6 +211,32 @@ pub enum MicroOp {
 }
 
 impl MicroOp {
+    /// Returns the discriminant tag for this MicroOp.
+    /// FROZEN: These values are part of the witness format.
+    #[inline]
+    pub const fn discriminant(&self) -> u8 {
+        match self {
+            MicroOp::LoadVector { .. } => 0,
+            MicroOp::ValidateCmpEq { .. } => 1,
+            MicroOp::ValidateCmpGt { .. } => 2,
+            MicroOp::ValidateCmpLt { .. } => 3,
+            MicroOp::ValidateNonZero { .. } => 4,
+            MicroOp::MaskAnd { .. } => 5,
+            MicroOp::MaskOr { .. } => 6,
+            MicroOp::MaskNot { .. } => 7,
+            MicroOp::Select { .. } => 8,
+            MicroOp::Emit { .. } => 9,
+            MicroOp::BroadcastImm { .. } => 10,
+            MicroOp::Add { .. } => 11,
+            MicroOp::Sub { .. } => 12,
+            MicroOp::And { .. } => 13,
+            MicroOp::Or { .. } => 14,
+            MicroOp::Xor { .. } => 15,
+            MicroOp::ByteSwap { .. } => 16,
+            MicroOp::Nop { .. } => 17,
+        }
+    }
+
     /// Returns the instruction footprint in bytes.
     /// These are measured, not guessed.
     pub const fn footprint_bytes(&self) -> u8 {
@@ -380,30 +406,6 @@ impl MicroOp {
                 required_alignment: 0,
                 max_offset: u32::MAX,
             },
-        }
-    }
-
-    /// Discriminant for witness hashing
-    pub const fn discriminant(&self) -> u8 {
-        match self {
-            MicroOp::LoadVector { .. } => 0,
-            MicroOp::ValidateCmpEq { .. } => 1,
-            MicroOp::ValidateCmpGt { .. } => 2,
-            MicroOp::ValidateCmpLt { .. } => 3,
-            MicroOp::ValidateNonZero { .. } => 4,
-            MicroOp::MaskAnd { .. } => 5,
-            MicroOp::MaskOr { .. } => 6,
-            MicroOp::MaskNot { .. } => 7,
-            MicroOp::Select { .. } => 8,
-            MicroOp::Emit { .. } => 9,
-            MicroOp::BroadcastImm { .. } => 10,
-            MicroOp::Add { .. } => 11,
-            MicroOp::Sub { .. } => 12,
-            MicroOp::And { .. } => 13,
-            MicroOp::Or { .. } => 14,
-            MicroOp::Xor { .. } => 15,
-            MicroOp::ByteSwap { .. } => 16,
-            MicroOp::Nop { .. } => 17,
         }
     }
 
