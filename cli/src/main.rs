@@ -11,6 +11,7 @@ use std::time::Instant;
 use siphon_tcb::{
     RifGraph, RifNode, RifVersion, NodeIndex, ScalarType, MemoryAccess, MemoryRegion,
     Alignment, Constraint, compute_semantic_hash,
+    parse_protocol, Protocol, ProtocolField, FieldConstraint, ParseError,
 };
 use siphon_tcb::lowering::{
     LoweringEngine, SimdWidth, DivergenceChecker, SerializedWitness,
@@ -362,7 +363,7 @@ fn cmd_bench(protocol_path: &str) -> ExitCode {
     };
     
     // Generate test packets
-    let test_packets = protocol.generate_test_packets(1000);
+    let test_packets = generate_test_packets(&protocol, 1000);
     
     // Get JIT function pointer
     let jit_fn = kernel.as_fn();
@@ -482,322 +483,81 @@ fn cmd_bench(protocol_path: &str) -> ExitCode {
 }
 
 // ============================================================================
-// Protocol Loading and Parsing
+// Protocol Loading (uses library frontend module)
 // ============================================================================
-
-struct Protocol {
-    name: String,
-    version: u8,
-    fields: Vec<ProtocolField>,
-    max_size: u16,
-}
-
-struct ProtocolField {
-    name: String,
-    offset: u32,
-    scalar_type: ScalarType,
-    constraint: Option<FieldConstraint>,
-}
-
-enum FieldConstraint {
-    Range { lo: u64, hi: u64 },
-    Equals(u64),
-    NonZero,
-}
 
 fn load_protocol(path: &str) -> Result<Protocol, String> {
     let content = fs::read_to_string(path)
         .map_err(|e| format!("cannot read file: {}", e))?;
     
-    parse_protocol(&content)
+    parse_protocol(&content).map_err(|e| format!("parse error: {:?}", e))
 }
 
-fn parse_protocol(content: &str) -> Result<Protocol, String> {
-    let mut name = String::from("unnamed");
-    let mut version: u8 = 1;
-    let mut fields = Vec::new();
-    let mut current_offset: u32 = 0;
-    let mut max_size: u16 = 64;
+fn generate_test_packets(protocol: &Protocol, count: usize) -> Vec<Vec<u8>> {
+    let mut packets = Vec::with_capacity(count);
     
-    for line in content.lines() {
-        let line = line.trim();
+    for i in 0..count {
+        let mut packet = vec![0u8; protocol.max_size as usize];
         
-        // Skip comments and empty lines
-        if line.is_empty() || line.starts_with("//") || line.starts_with('#') {
-            continue;
-        }
+        packet[0] = protocol.version;
         
-        // Protocol declaration
-        if line.starts_with("protocol ") {
-            name = line.strip_prefix("protocol ")
-                .unwrap_or("unnamed")
-                .trim_end_matches('{')
-                .trim()
-                .to_string();
-            continue;
-        }
+        let force_invalid = i % 100 == 99;
         
-        // Version declaration
-        if line.starts_with("version:") {
-            let v = line.strip_prefix("version:")
-                .unwrap_or("1")
-                .trim()
-                .trim_end_matches(';');
-            version = v.parse().unwrap_or(1);
-            continue;
-        }
-        
-        // Max size declaration
-        if line.starts_with("max_size:") {
-            let s = line.strip_prefix("max_size:")
-                .unwrap_or("64")
-                .trim()
-                .trim_end_matches(';');
-            max_size = s.parse().unwrap_or(64);
-            continue;
-        }
-        
-        // Field declaration: name: type @offset(N) @constraint
-        if line.contains(':') && !line.starts_with("version") && !line.starts_with("max_size") {
-            if let Some(field) = parse_field(line, &mut current_offset) {
-                fields.push(field);
-            }
-        }
-    }
-    
-    Ok(Protocol { name, version, fields, max_size })
-}
-
-fn parse_field(line: &str, current_offset: &mut u32) -> Option<ProtocolField> {
-    let line = line.trim().trim_end_matches(';').trim_end_matches(',');
-    
-    // Split on ':'
-    let parts: Vec<&str> = line.splitn(2, ':').collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    
-    let name = parts[0].trim().to_string();
-    let rest = parts[1].trim();
-    
-    // Parse type and attributes
-    let tokens: Vec<&str> = rest.split_whitespace().collect();
-    if tokens.is_empty() {
-        return None;
-    }
-    
-    let scalar_type = match tokens[0] {
-        "u8" => ScalarType::U8,
-        "u16" => ScalarType::U16,
-        "u32" => ScalarType::U32,
-        "u64" => ScalarType::U64,
-        "i32" => ScalarType::I32,
-        "i64" => ScalarType::I64,
-        _ => ScalarType::U8,
-    };
-    
-    let mut offset = *current_offset;
-    let mut constraint = None;
-    
-    // Parse attributes
-    for token in &tokens[1..] {
-        if token.starts_with("@offset(") {
-            let val = token.strip_prefix("@offset(")
-                .and_then(|s| s.strip_suffix(')'))
-                .and_then(|s| s.parse().ok());
-            if let Some(o) = val {
-                offset = o;
-            }
-        } else if token.starts_with("@range(") {
-            let inner = token.strip_prefix("@range(")
-                .and_then(|s| s.strip_suffix(')'));
-            if let Some(range_str) = inner {
-                let bounds: Vec<&str> = range_str.split(',').collect();
-                if bounds.len() == 2 {
-                    let lo = bounds[0].trim().parse().unwrap_or(0);
-                    let hi = bounds[1].trim().parse().unwrap_or(u64::MAX);
-                    constraint = Some(FieldConstraint::Range { lo, hi });
+        for (j, field) in protocol.fields.iter().enumerate() {
+            let value = if force_invalid && j == 0 {
+                match &field.constraint {
+                    Some(FieldConstraint::Range { hi, .. }) => hi + 100,
+                    Some(FieldConstraint::NonZero) => 0,
+                    Some(FieldConstraint::Equals(v)) => v + 1,
+                    None => (i + j) as u64 % 256,
                 }
-            }
-        } else if token.starts_with("@equals(") {
-            let val = token.strip_prefix("@equals(")
-                .and_then(|s| s.strip_suffix(')'))
-                .and_then(|s| s.parse().ok());
-            if let Some(v) = val {
-                constraint = Some(FieldConstraint::Equals(v));
-            }
-        } else if *token == "@nonzero" {
-            constraint = Some(FieldConstraint::NonZero);
-        }
-    }
-    
-    *current_offset = offset + scalar_type.size_bytes() as u32;
-    
-    Some(ProtocolField { name, offset, scalar_type, constraint })
-}
-
-impl Protocol {
-    fn to_rif_graph(&self) -> RifGraph<'static> {
-        // Leak the nodes to get 'static lifetime (acceptable for CLI)
-        let nodes: &'static [RifNode] = Box::leak(self.build_rif_nodes().into_boxed_slice());
-        
-        RifGraph {
-            version: RifVersion::CURRENT,
-            protocol_version: self.version as u32,
-            nodes,
-            max_packet_length: self.max_size,
-            version_discriminator_node: NodeIndex(0),
-        }
-    }
-    
-    fn build_rif_nodes(&self) -> Vec<RifNode> {
-        let mut nodes = Vec::new();
-        let mut field_to_node: Vec<usize> = Vec::new();
-        
-        // Load nodes for each field
-        for field in &self.fields {
-            let node_idx = nodes.len();
-            field_to_node.push(node_idx);
+            } else {
+                match &field.constraint {
+                    Some(FieldConstraint::Range { lo, hi }) => {
+                        let range = hi.saturating_sub(*lo) + 1;
+                        lo + ((i + j) as u64 % range.max(1))
+                    }
+                    Some(FieldConstraint::NonZero) => {
+                        ((i + j) as u64 % 255) + 1
+                    }
+                    Some(FieldConstraint::Equals(v)) => *v,
+                    None => (i + j) as u64 % 256,
+                }
+            };
+            let offset = field.offset as usize;
             
-            nodes.push(RifNode::Load {
-                scalar_type: field.scalar_type,
-                access: MemoryAccess {
-                    region: MemoryRegion::PacketInput,
-                    offset: field.offset,
-                    length: field.scalar_type.size_bytes() as u16,
-                    mask_node_idx: None,
-                    alignment: Alignment::Natural,
-                },
-            });
-        }
-        
-        // Validation nodes
-        let mut last_guard: Option<NodeIndex> = None;
-        
-        for (i, field) in self.fields.iter().enumerate() {
-            if let Some(ref constraint) = field.constraint {
-                let load_node = NodeIndex(field_to_node[i] as u32);
-                
-                let validate_node_idx = nodes.len();
-                match constraint {
-                    FieldConstraint::Range { lo, hi } => {
-                        nodes.push(RifNode::Validate {
-                            value_node: load_node,
-                            constraint: Constraint::Range { lo: *lo, hi: *hi },
-                        });
-                    }
-                    FieldConstraint::Equals(val) => {
-                        // Use Range with equal bounds to simulate Equals
-                        nodes.push(RifNode::Validate {
-                            value_node: load_node,
-                            constraint: Constraint::Range { lo: *val, hi: *val },
-                        });
-                    }
-                    FieldConstraint::NonZero => {
-                        nodes.push(RifNode::Validate {
-                            value_node: load_node,
-                            constraint: Constraint::NonZero,
-                        });
+            match field.scalar_type {
+                ScalarType::U8 => {
+                    if offset < packet.len() {
+                        packet[offset] = value as u8;
                     }
                 }
-                
-                // Guard node
-                let guard_idx = nodes.len();
-                nodes.push(RifNode::Guard {
-                    parent_mask: last_guard,
-                    condition: NodeIndex(validate_node_idx as u32),
-                });
-                last_guard = Some(NodeIndex(guard_idx as u32));
+                ScalarType::U16 => {
+                    if offset + 1 < packet.len() {
+                        let bytes = (value as u16).to_le_bytes();
+                        packet[offset..offset+2].copy_from_slice(&bytes);
+                    }
+                }
+                ScalarType::U32 => {
+                    if offset + 3 < packet.len() {
+                        let bytes = (value as u32).to_le_bytes();
+                        packet[offset..offset+4].copy_from_slice(&bytes);
+                    }
+                }
+                ScalarType::U64 => {
+                    if offset + 7 < packet.len() {
+                        let bytes = value.to_le_bytes();
+                        packet[offset..offset+8].copy_from_slice(&bytes);
+                    }
+                }
+                _ => {}
             }
         }
         
-        // Emit nodes for each field
-        for (i, field) in self.fields.iter().enumerate() {
-            let load_node = NodeIndex(field_to_node[i] as u32);
-            nodes.push(RifNode::Emit {
-                field_id: i as u16,
-                value_node: load_node,
-                mask: last_guard,
-            });
-        }
-        
-        nodes
+        packets.push(packet);
     }
     
-    fn generate_test_packets(&self, count: usize) -> Vec<Vec<u8>> {
-        let mut packets = Vec::with_capacity(count);
-        
-        for i in 0..count {
-            let mut packet = vec![0u8; self.max_size as usize];
-            
-            // Set version byte
-            packet[0] = self.version;
-            
-            // Mix of valid and invalid packets for thorough testing
-            // Every 100th packet intentionally fails validation
-            let force_invalid = i % 100 == 99;
-            
-            // Fill fields with deterministic test data
-            for (j, field) in self.fields.iter().enumerate() {
-                // Generate values that satisfy constraints (unless forcing invalid)
-                let value = if force_invalid && j == 0 {
-                    // Force first field to fail validation
-                    match &field.constraint {
-                        Some(FieldConstraint::Range { hi, .. }) => hi + 100,
-                        Some(FieldConstraint::NonZero) => 0,
-                        Some(FieldConstraint::Equals(v)) => v + 1,
-                        None => (i + j) as u64 % 256,
-                    }
-                } else {
-                    match &field.constraint {
-                        Some(FieldConstraint::Range { lo, hi }) => {
-                            // Value in range [lo, hi]
-                            let range = hi.saturating_sub(*lo) + 1;
-                            lo + ((i + j) as u64 % range.max(1))
-                        }
-                        Some(FieldConstraint::NonZero) => {
-                            // Non-zero value
-                            ((i + j) as u64 % 255) + 1
-                        }
-                        Some(FieldConstraint::Equals(v)) => *v,
-                        None => (i + j) as u64 % 256,
-                    }
-                };
-                let offset = field.offset as usize;
-                
-                match field.scalar_type {
-                    ScalarType::U8 => {
-                        if offset < packet.len() {
-                            packet[offset] = value as u8;
-                        }
-                    }
-                    ScalarType::U16 => {
-                        if offset + 1 < packet.len() {
-                            let bytes = (value as u16).to_le_bytes();
-                            packet[offset..offset+2].copy_from_slice(&bytes);
-                        }
-                    }
-                    ScalarType::U32 => {
-                        if offset + 3 < packet.len() {
-                            let bytes = (value as u32).to_le_bytes();
-                            packet[offset..offset+4].copy_from_slice(&bytes);
-                        }
-                    }
-                    ScalarType::U64 => {
-                        if offset + 7 < packet.len() {
-                            let bytes = value.to_le_bytes();
-                            packet[offset..offset+8].copy_from_slice(&bytes);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            
-            packets.push(packet);
-        }
-        
-        packets
-    }
+    packets
 }
 
 // ============================================================================
