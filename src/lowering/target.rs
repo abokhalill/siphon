@@ -622,6 +622,11 @@ pub struct RegAlloc {
     max_vreg: u8,
     /// Maps RIF NodeIndex -> VReg for value nodes
     node_to_vreg: [Option<VReg>; 512],
+    /// Maps RIF NodeIndex -> ScalarType for type tracking
+    node_to_type: [Option<ScalarType>; 512],
+    /// Tracks output offset for each field_id
+    field_offsets: [u16; 256],
+    next_output_offset: u16,
 }
 
 impl RegAlloc {
@@ -633,6 +638,9 @@ impl RegAlloc {
                 SimdWidth::Avx512 => VReg::MAX_AVX512,
             },
             node_to_vreg: [None; 512],
+            node_to_type: [None; 512],
+            field_offsets: [0; 256],
+            next_output_offset: 0,
         }
     }
 
@@ -646,10 +654,18 @@ impl RegAlloc {
         Ok(reg)
     }
 
-    /// Bind a RIF node to a register
+    /// Bind a RIF node to a register with its scalar type
     pub fn bind(&mut self, node: NodeIndex, reg: VReg) {
         if (node.0 as usize) < 512 {
             self.node_to_vreg[node.0 as usize] = Some(reg);
+        }
+    }
+
+    /// Bind a RIF node to a register with its scalar type
+    pub fn bind_typed(&mut self, node: NodeIndex, reg: VReg, scalar_type: ScalarType) {
+        if (node.0 as usize) < 512 {
+            self.node_to_vreg[node.0 as usize] = Some(reg);
+            self.node_to_type[node.0 as usize] = Some(scalar_type);
         }
     }
 
@@ -659,6 +675,34 @@ impl RegAlloc {
             self.node_to_vreg[node.0 as usize]
         } else {
             None
+        }
+    }
+
+    /// Get the scalar type for a RIF node
+    pub fn get_type(&self, node: NodeIndex) -> Option<ScalarType> {
+        if (node.0 as usize) < 512 {
+            self.node_to_type[node.0 as usize]
+        } else {
+            None
+        }
+    }
+
+    /// Allocate output offset for a field, returns the offset
+    pub fn alloc_field_offset(&mut self, field_id: u16, scalar_type: ScalarType) -> u16 {
+        let offset = self.next_output_offset;
+        if (field_id as usize) < 256 {
+            self.field_offsets[field_id as usize] = offset;
+        }
+        self.next_output_offset += scalar_type.size_bytes() as u16;
+        offset
+    }
+
+    /// Get the output offset for a field
+    pub fn get_field_offset(&self, field_id: u16) -> u16 {
+        if (field_id as usize) < 256 {
+            self.field_offsets[field_id as usize]
+        } else {
+            0
         }
     }
 }

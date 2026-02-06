@@ -388,7 +388,7 @@ impl LoweringEngine {
 
         witness.record(node_idx, &op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
         ops.push(op)?;
-        regalloc.bind(node_idx, dst);
+        regalloc.bind_typed(node_idx, dst, scalar_type);
         Ok(())
     }
 
@@ -736,10 +736,13 @@ impl LoweringEngine {
         let src = regalloc.get(value_node).ok_or(LoweringError::UnsupportedNode)?;
         let mask_reg = mask.and_then(|m| regalloc.get(m));
 
+        let scalar_type = regalloc.get_type(value_node).unwrap_or(ScalarType::U64);
+        let field_offset = regalloc.alloc_field_offset(field_id, scalar_type);
+
         let op = MicroOp::Emit {
             src,
-            field_offset: field_id * 8, // assume 8-byte fields
-            scalar_type: ScalarType::U64,
+            field_offset,
+            scalar_type,
             mask: mask_reg,
         };
 
@@ -981,13 +984,13 @@ impl LoweringEngine {
         Ok(())
     }
 
-    fn emit_scalar_store(&self, code: &mut ExecutableBuffer, src: VReg, offset: u32, _scalar_type: ScalarType, mask: Option<VReg>) -> Result<(), LoweringError> {
+    fn emit_scalar_store(&self, code: &mut ExecutableBuffer, src: VReg, offset: u32, scalar_type: ScalarType, mask: Option<VReg>) -> Result<(), LoweringError> {
         if let Some(mask_reg) = mask {
             self.emit_load_vreg_to_rcx(code, mask_reg)?;
             code.write(&[0x48, 0x85, 0xC9])?;  // TEST RCX, RCX
             code.write(&[0x74])?;              // JZ rel8 (skip store)
-            let skip_offset = if offset < 128 { 10u8 } else { 17u8 };
-            code.write(&[skip_offset])?;
+            let skip_offset = self.store_instruction_size(offset, scalar_type) + 7;
+            code.write(&[skip_offset as u8])?;
         }
 
         let stack_offset = -8 * (src.0 as i32 + 1);
@@ -998,13 +1001,60 @@ impl LoweringEngine {
             code.write(&stack_offset.to_le_bytes())?;
         }
         
-        if offset < 128 {
-            code.write(&[0x49, 0x0F, 0xC3, 0x44, 0x24, offset as u8])?;  // MOVNTI
-        } else {
-            code.write(&[0x49, 0x0F, 0xC3, 0x84, 0x24])?;
-            code.write(&offset.to_le_bytes())?;
+        match scalar_type.size_bytes() {
+            8 => {
+                if offset < 128 {
+                    code.write(&[0x49, 0x89, 0x44, 0x24, offset as u8])?;  // MOV [r12+off8], RAX
+                } else {
+                    code.write(&[0x49, 0x89, 0x84, 0x24])?;                // MOV [r12+off32], RAX
+                    code.write(&offset.to_le_bytes())?;
+                }
+            }
+            4 => {
+                if offset < 128 {
+                    code.write(&[0x41, 0x89, 0x44, 0x24, offset as u8])?;  // MOV [r12+off8], EAX
+                } else {
+                    code.write(&[0x41, 0x89, 0x84, 0x24])?;                // MOV [r12+off32], EAX
+                    code.write(&offset.to_le_bytes())?;
+                }
+            }
+            2 => {
+                if offset < 128 {
+                    code.write(&[0x66, 0x41, 0x89, 0x44, 0x24, offset as u8])?;  // MOV [r12+off8], AX
+                } else {
+                    code.write(&[0x66, 0x41, 0x89, 0x84, 0x24])?;                // MOV [r12+off32], AX
+                    code.write(&offset.to_le_bytes())?;
+                }
+            }
+            1 => {
+                if offset < 128 {
+                    code.write(&[0x41, 0x88, 0x44, 0x24, offset as u8])?;  // MOV [r12+off8], AL
+                } else {
+                    code.write(&[0x41, 0x88, 0x84, 0x24])?;                // MOV [r12+off32], AL
+                    code.write(&offset.to_le_bytes())?;
+                }
+            }
+            _ => {
+                if offset < 128 {
+                    code.write(&[0x49, 0x89, 0x44, 0x24, offset as u8])?;
+                } else {
+                    code.write(&[0x49, 0x89, 0x84, 0x24])?;
+                    code.write(&offset.to_le_bytes())?;
+                }
+            }
         }
         Ok(())
+    }
+
+    fn store_instruction_size(&self, offset: u32, scalar_type: ScalarType) -> usize {
+        let base = match scalar_type.size_bytes() {
+            8 => 5,
+            4 => 5,
+            2 => 6,
+            1 => 5,
+            _ => 5,
+        };
+        if offset < 128 { base } else { base + 3 }
     }
 
     fn emit_scalar_const(&self, code: &mut ExecutableBuffer, dst: VReg, value: u64) -> Result<(), LoweringError> {
