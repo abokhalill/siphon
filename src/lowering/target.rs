@@ -613,7 +613,20 @@ pub enum LoweringError {
     UnsupportedNode,
     InvalidMaskChain,
     WitnessGenerationFailed,
+    NodeLimitExceeded {
+        node_idx: u32,
+        limit: u32,
+    },
+    FieldLimitExceeded {
+        field_id: u16,
+        limit: u16,
+    },
+    OutputBufferOverflow,
+    PacketBoundsOverflow,
 }
+
+pub const MAX_RIF_NODES: usize = 512;
+pub const MAX_FIELDS: usize = 256;
 
 /// Register allocator state. Dead simple: linear scan, no spilling.
 /// If you need more registers, your kernel is too complex.
@@ -621,11 +634,11 @@ pub struct RegAlloc {
     next_vreg: u8,
     max_vreg: u8,
     /// Maps RIF NodeIndex -> VReg for value nodes
-    node_to_vreg: [Option<VReg>; 512],
+    node_to_vreg: [Option<VReg>; MAX_RIF_NODES],
     /// Maps RIF NodeIndex -> ScalarType for type tracking
-    node_to_type: [Option<ScalarType>; 512],
+    node_to_type: [Option<ScalarType>; MAX_RIF_NODES],
     /// Tracks output offset for each field_id
-    field_offsets: [u16; 256],
+    field_offsets: [u16; MAX_FIELDS],
     next_output_offset: u16,
 }
 
@@ -637,9 +650,9 @@ impl RegAlloc {
                 SimdWidth::Avx2 => VReg::MAX_AVX2,
                 SimdWidth::Avx512 => VReg::MAX_AVX512,
             },
-            node_to_vreg: [None; 512],
-            node_to_type: [None; 512],
-            field_offsets: [0; 256],
+            node_to_vreg: [None; MAX_RIF_NODES],
+            node_to_type: [None; MAX_RIF_NODES],
+            field_offsets: [0; MAX_FIELDS],
             next_output_offset: 0,
         }
     }
@@ -654,56 +667,66 @@ impl RegAlloc {
         Ok(reg)
     }
 
-    /// Bind a RIF node to a register with its scalar type
-    pub fn bind(&mut self, node: NodeIndex, reg: VReg) {
-        if (node.0 as usize) < 512 {
-            self.node_to_vreg[node.0 as usize] = Some(reg);
+    /// Bind a RIF node to a register. Fails if node index exceeds MAX_RIF_NODES.
+    pub fn bind(&mut self, node: NodeIndex, reg: VReg) -> Result<(), LoweringError> {
+        let idx = node.0 as usize;
+        if idx >= MAX_RIF_NODES {
+            return Err(LoweringError::NodeLimitExceeded { node_idx: node.0, limit: MAX_RIF_NODES as u32 });
         }
+        self.node_to_vreg[idx] = Some(reg);
+        Ok(())
     }
 
-    /// Bind a RIF node to a register with its scalar type
-    pub fn bind_typed(&mut self, node: NodeIndex, reg: VReg, scalar_type: ScalarType) {
-        if (node.0 as usize) < 512 {
-            self.node_to_vreg[node.0 as usize] = Some(reg);
-            self.node_to_type[node.0 as usize] = Some(scalar_type);
+    /// Bind a RIF node to a register with its scalar type. Fails if node index exceeds MAX_RIF_NODES.
+    pub fn bind_typed(&mut self, node: NodeIndex, reg: VReg, scalar_type: ScalarType) -> Result<(), LoweringError> {
+        let idx = node.0 as usize;
+        if idx >= MAX_RIF_NODES {
+            return Err(LoweringError::NodeLimitExceeded { node_idx: node.0, limit: MAX_RIF_NODES as u32 });
         }
+        self.node_to_vreg[idx] = Some(reg);
+        self.node_to_type[idx] = Some(scalar_type);
+        Ok(())
     }
 
-    /// Get the register for a RIF node
+    /// Get the register for a RIF node. Returns None if node index exceeds limit or not bound.
     pub fn get(&self, node: NodeIndex) -> Option<VReg> {
-        if (node.0 as usize) < 512 {
-            self.node_to_vreg[node.0 as usize]
-        } else {
-            None
+        let idx = node.0 as usize;
+        if idx >= MAX_RIF_NODES {
+            return None;
         }
+        self.node_to_vreg[idx]
     }
 
     /// Get the scalar type for a RIF node
     pub fn get_type(&self, node: NodeIndex) -> Option<ScalarType> {
-        if (node.0 as usize) < 512 {
-            self.node_to_type[node.0 as usize]
-        } else {
-            None
+        let idx = node.0 as usize;
+        if idx >= MAX_RIF_NODES {
+            return None;
         }
+        self.node_to_type[idx]
     }
 
-    /// Allocate output offset for a field, returns the offset
-    pub fn alloc_field_offset(&mut self, field_id: u16, scalar_type: ScalarType) -> u16 {
-        let offset = self.next_output_offset;
-        if (field_id as usize) < 256 {
-            self.field_offsets[field_id as usize] = offset;
+    /// Allocate output offset for a field. Fails if field_id exceeds MAX_FIELDS.
+    pub fn alloc_field_offset(&mut self, field_id: u16, scalar_type: ScalarType) -> Result<u16, LoweringError> {
+        let idx = field_id as usize;
+        if idx >= MAX_FIELDS {
+            return Err(LoweringError::FieldLimitExceeded { field_id, limit: MAX_FIELDS as u16 });
         }
-        self.next_output_offset += scalar_type.size_bytes() as u16;
-        offset
+        let offset = self.next_output_offset;
+        self.field_offsets[idx] = offset;
+        self.next_output_offset = self.next_output_offset
+            .checked_add(scalar_type.size_bytes() as u16)
+            .ok_or(LoweringError::OutputBufferOverflow)?;
+        Ok(offset)
     }
 
     /// Get the output offset for a field
-    pub fn get_field_offset(&self, field_id: u16) -> u16 {
-        if (field_id as usize) < 256 {
-            self.field_offsets[field_id as usize]
-        } else {
-            0
+    pub fn get_field_offset(&self, field_id: u16) -> Option<u16> {
+        let idx = field_id as usize;
+        if idx >= MAX_FIELDS {
+            return None;
         }
+        Some(self.field_offsets[idx])
     }
 }
 

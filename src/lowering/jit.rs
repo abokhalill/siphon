@@ -249,7 +249,7 @@ impl LoweringEngine {
 
         let final_mask = self.find_final_mask(ops.as_slice());
 
-        let min_packet_len = self.compute_min_packet_len(graph);
+        let min_packet_len = self.compute_min_packet_len(graph)?;
 
         let mut code = ExecutableBuffer::new(ICACHE_BUDGET_BYTES)?;
         self.emit_prologue(&mut code, min_packet_len)?;
@@ -296,7 +296,7 @@ impl LoweringEngine {
 
         mem_verifier.verify_all().map_err(|_| LoweringError::WitnessGenerationFailed)?;
 
-        let min_packet_len = self.compute_min_packet_len(graph);
+        let min_packet_len = self.compute_min_packet_len(graph)?;
 
         let mut code = ExecutableBuffer::new(ICACHE_BUDGET_BYTES)?;
         self.emit_batch_prologue(&mut code, min_packet_len)?;
@@ -392,7 +392,7 @@ impl LoweringEngine {
 
         witness.record(node_idx, &op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
         ops.push(op)?;
-        regalloc.bind_typed(node_idx, dst, scalar_type);
+        regalloc.bind_typed(node_idx, dst, scalar_type)?;
         Ok(())
     }
 
@@ -459,7 +459,7 @@ impl LoweringEngine {
                 };
                 witness.record(node_idx, &microop).map_err(|_| LoweringError::WitnessGenerationFailed)?;
                 ops.push(microop)?;
-                regalloc.bind(node_idx, dst);
+                regalloc.bind(node_idx, dst)?;
                 return Ok(());
             }
             BinaryOp::Lt => {
@@ -471,7 +471,7 @@ impl LoweringEngine {
                 };
                 witness.record(node_idx, &microop).map_err(|_| LoweringError::WitnessGenerationFailed)?;
                 ops.push(microop)?;
-                regalloc.bind(node_idx, dst);
+                regalloc.bind(node_idx, dst)?;
                 return Ok(());
             }
             BinaryOp::Gt => {
@@ -483,7 +483,7 @@ impl LoweringEngine {
                 };
                 witness.record(node_idx, &microop).map_err(|_| LoweringError::WitnessGenerationFailed)?;
                 ops.push(microop)?;
-                regalloc.bind(node_idx, dst);
+                regalloc.bind(node_idx, dst)?;
                 return Ok(());
             }
             _ => return Err(LoweringError::UnsupportedNode),
@@ -491,7 +491,7 @@ impl LoweringEngine {
 
         witness.record(node_idx, &microop).map_err(|_| LoweringError::WitnessGenerationFailed)?;
         ops.push(microop)?;
-        regalloc.bind(node_idx, dst);
+        regalloc.bind(node_idx, dst)?;
         Ok(())
     }
 
@@ -540,7 +540,7 @@ impl LoweringEngine {
 
         witness.record(node_idx, &microop).map_err(|_| LoweringError::WitnessGenerationFailed)?;
         ops.push(microop)?;
-        regalloc.bind(node_idx, dst);
+        regalloc.bind(node_idx, dst)?;
         Ok(())
     }
 
@@ -565,7 +565,7 @@ impl LoweringEngine {
 
         witness.record(node_idx, &op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
         ops.push(op)?;
-        regalloc.bind(node_idx, dst);
+        regalloc.bind(node_idx, dst)?;
         Ok(())
     }
 
@@ -652,7 +652,7 @@ impl LoweringEngine {
             }
         }
 
-        regalloc.bind(node_idx, dst_mask);
+        regalloc.bind(node_idx, dst_mask)?;
         Ok(())
     }
 
@@ -692,7 +692,7 @@ impl LoweringEngine {
         witness.refine_mask(new_mask).map_err(|_| LoweringError::InvalidMaskChain)?;
         witness.set_mask_reg(dst, new_mask);
 
-        regalloc.bind(node_idx, dst);
+        regalloc.bind(node_idx, dst)?;
         Ok(())
     }
 
@@ -722,7 +722,7 @@ impl LoweringEngine {
 
         witness.record(node_idx, &op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
         ops.push(op)?;
-        regalloc.bind(node_idx, dst);
+        regalloc.bind(node_idx, dst)?;
         Ok(())
     }
 
@@ -741,7 +741,7 @@ impl LoweringEngine {
         let mask_reg = mask.and_then(|m| regalloc.get(m));
 
         let scalar_type = regalloc.get_type(value_node).unwrap_or(ScalarType::U64);
-        let field_offset = regalloc.alloc_field_offset(field_id, scalar_type);
+        let field_offset = regalloc.alloc_field_offset(field_id, scalar_type)?;
 
         let op = MicroOp::Emit {
             src,
@@ -777,17 +777,19 @@ impl LoweringEngine {
         Ok(())
     }
 
-    fn compute_min_packet_len(&self, graph: &RifGraph) -> u16 {
+    fn compute_min_packet_len(&self, graph: &RifGraph) -> Result<u16, LoweringError> {
         let mut max_end: u32 = 0;
         for node in graph.nodes.iter() {
             if let RifNode::Load { access, scalar_type } = node {
-                let end = access.offset + scalar_type.size_bytes() as u32;
+                let end = access.offset
+                    .checked_add(scalar_type.size_bytes() as u32)
+                    .ok_or(LoweringError::PacketBoundsOverflow)?;
                 if end > max_end {
                     max_end = end;
                 }
             }
         }
-        max_end.min(u16::MAX as u32) as u16
+        Ok(max_end.min(u16::MAX as u32) as u16)
     }
 
     fn find_final_mask(&self, ops: &[MicroOp]) -> Option<VReg> {
