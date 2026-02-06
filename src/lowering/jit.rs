@@ -249,8 +249,10 @@ impl LoweringEngine {
 
         let final_mask = self.find_final_mask(ops.as_slice());
 
+        let min_packet_len = self.compute_min_packet_len(graph);
+
         let mut code = ExecutableBuffer::new(ICACHE_BUDGET_BYTES)?;
-        self.emit_prologue(&mut code)?;
+        self.emit_prologue(&mut code, min_packet_len)?;
         
         for op in ops.as_slice() {
             self.emit_microop(op, &mut code)?;
@@ -294,8 +296,10 @@ impl LoweringEngine {
 
         mem_verifier.verify_all().map_err(|_| LoweringError::WitnessGenerationFailed)?;
 
+        let min_packet_len = self.compute_min_packet_len(graph);
+
         let mut code = ExecutableBuffer::new(ICACHE_BUDGET_BYTES)?;
-        self.emit_batch_prologue(&mut code)?;
+        self.emit_batch_prologue(&mut code, min_packet_len)?;
         
         for op in ops.as_slice() {
             self.emit_batch_microop(op, &mut code)?;
@@ -751,7 +755,18 @@ impl LoweringEngine {
         Ok(())
     }
 
-    fn emit_prologue(&self, code: &mut ExecutableBuffer) -> Result<(), LoweringError> {
+    fn emit_prologue(&self, code: &mut ExecutableBuffer, min_packet_len: u16) -> Result<(), LoweringError> {
+        // Bounds check: if esi < min_packet_len, return 2 (bounds error)
+        if min_packet_len > 0 {
+            code.write(&[0x81, 0xFE])?;           // CMP ESI, imm32
+            code.write(&(min_packet_len as u32).to_le_bytes())?;
+            code.write(&[0x72, 0x04])?;           // JB +4 (to early exit)
+            code.write(&[0xEB, 0x06])?;           // JMP +6 (skip early exit)
+            // Early exit: return 2 (bounds error)
+            code.write(&[0xB8, 0x02, 0x00, 0x00, 0x00])?;  // MOV EAX, 2
+            code.write(&[0xC3])?;                 // RET
+        }
+
         code.write(&[0x0F, 0x18, 0x07])?;         // PREFETCHT0 [rdi]
         code.write(&[0x0F, 0x18, 0x47, 0x40])?;   // PREFETCHT0 [rdi+64]
         code.write(&[0x55])?;                     // push rbp
@@ -760,6 +775,19 @@ impl LoweringEngine {
         code.write(&[0x41, 0x54])?;               // push r12
         code.write(&[0x49, 0x89, 0xD4])?;         // mov r12, rdx
         Ok(())
+    }
+
+    fn compute_min_packet_len(&self, graph: &RifGraph) -> u16 {
+        let mut max_end: u32 = 0;
+        for node in graph.nodes.iter() {
+            if let RifNode::Load { access, scalar_type } = node {
+                let end = access.offset + scalar_type.size_bytes() as u32;
+                if end > max_end {
+                    max_end = end;
+                }
+            }
+        }
+        max_end.min(u16::MAX as u32) as u16
     }
 
     fn find_final_mask(&self, ops: &[MicroOp]) -> Option<VReg> {
@@ -799,7 +827,17 @@ impl LoweringEngine {
         Ok(())
     }
 
-    fn emit_batch_prologue(&self, code: &mut ExecutableBuffer) -> Result<(), LoweringError> {
+    fn emit_batch_prologue(&self, code: &mut ExecutableBuffer, min_packet_len: u16) -> Result<(), LoweringError> {
+        // Bounds check for batch: check first packet length (simplified)
+        if min_packet_len > 0 {
+            code.write(&[0x81, 0xFE])?;           // CMP ESI, imm32
+            code.write(&(min_packet_len as u32).to_le_bytes())?;
+            code.write(&[0x72, 0x04])?;           // JB +4 (to early exit)
+            code.write(&[0xEB, 0x06])?;           // JMP +6 (skip early exit)
+            code.write(&[0xB8, 0x00, 0x00, 0x00, 0x00])?;  // MOV EAX, 0 (no packets succeeded)
+            code.write(&[0xC3])?;                 // RET
+        }
+
         code.write(&[0x55, 0x48, 0x89, 0xE5])?;                       // push rbp; mov rbp, rsp
         code.write(&[0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57])?; // push r12-r15
         code.write(&[0x49, 0x89, 0xFC])?;                             // mov r12, rdi
