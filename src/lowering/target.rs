@@ -642,6 +642,9 @@ pub struct RegAlloc {
     /// Tracks output offset for each field_id
     field_offsets: [u16; MAX_FIELDS],
     next_output_offset: u16,
+    /// Free list for reclaimed registers. Fixed capacity, no heap.
+    free_list: [u8; 32],
+    free_count: u8,
 }
 
 impl RegAlloc {
@@ -656,17 +659,31 @@ impl RegAlloc {
             node_to_type: [None; MAX_RIF_NODES],
             field_offsets: [0; MAX_FIELDS],
             next_output_offset: 0,
+            free_list: [0; 32],
+            free_count: 0,
         }
     }
 
-    /// Allocate a fresh register
+    /// Allocate a register. Reclaimed registers are preferred over fresh ones.
     pub fn alloc(&mut self) -> Result<VReg, LoweringError> {
+        if self.free_count > 0 {
+            self.free_count -= 1;
+            return Ok(VReg(self.free_list[self.free_count as usize]));
+        }
         if self.next_vreg >= self.max_vreg {
             return Err(LoweringError::RegisterPressure);
         }
         let reg = VReg(self.next_vreg);
         self.next_vreg += 1;
         Ok(reg)
+    }
+
+    /// Return a register to the free pool for reuse.
+    pub fn free(&mut self, reg: VReg) {
+        if (self.free_count as usize) < self.free_list.len() {
+            self.free_list[self.free_count as usize] = reg.0;
+            self.free_count += 1;
+        }
     }
 
     /// Bind a RIF node to a register. Fails if node index exceeds MAX_RIF_NODES.

@@ -511,7 +511,6 @@ impl LoweringEngine {
         let microop = match op {
             UnaryOp::ByteSwap => MicroOp::ByteSwap { dst, src, scalar_type: result_type },
             UnaryOp::Not => {
-                // XOR with all-ones
                 let ones = regalloc.alloc()?;
                 let broadcast = MicroOp::BroadcastImm {
                     dst: ones,
@@ -520,11 +519,11 @@ impl LoweringEngine {
                 };
                 witness.record(node_idx, &broadcast).map_err(|_| LoweringError::WitnessGenerationFailed)?;
                 ops.push(broadcast)?;
-                
-                MicroOp::Xor { dst, src1: src, src2: ones }
+                let xor_op = MicroOp::Xor { dst, src1: src, src2: ones };
+                regalloc.free(ones);
+                xor_op
             }
             UnaryOp::Neg => {
-                // Subtract from zero
                 let zero = regalloc.alloc()?;
                 let broadcast = MicroOp::BroadcastImm {
                     dst: zero,
@@ -533,8 +532,9 @@ impl LoweringEngine {
                 };
                 witness.record(node_idx, &broadcast).map_err(|_| LoweringError::WitnessGenerationFailed)?;
                 ops.push(broadcast)?;
-                
-                MicroOp::Sub { dst, src1: zero, src2: src, scalar_type: result_type }
+                let sub_op = MicroOp::Sub { dst, src1: zero, src2: src, scalar_type: result_type };
+                regalloc.free(zero);
+                sub_op
             }
         };
 
@@ -628,6 +628,7 @@ impl LoweringEngine {
                 };
                 witness.record(node_idx, &ge_op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
                 ops.push(ge_op)?;
+                regalloc.free(lo_reg);
 
                 let le_mask = regalloc.alloc()?;
                 let le_op = MicroOp::ValidateCmpLt {
@@ -638,6 +639,7 @@ impl LoweringEngine {
                 };
                 witness.record(node_idx, &le_op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
                 ops.push(le_op)?;
+                regalloc.free(hi_reg);
 
                 let and_op = MicroOp::MaskAnd {
                     dst: dst_mask,
@@ -646,6 +648,8 @@ impl LoweringEngine {
                 };
                 witness.record(node_idx, &and_op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
                 ops.push(and_op)?;
+                regalloc.free(ge_mask);
+                regalloc.free(le_mask);
             }
             Constraint::Finite => {
                 return Err(LoweringError::UnsupportedNode);
