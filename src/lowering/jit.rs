@@ -828,6 +828,7 @@ impl LoweringEngine {
             code.write(&[0x31, 0xC0])?;        // xor eax, eax (always success if no guards)
         }
 
+        code.write(&[0xC5, 0xF8, 0x77])?;  // VZEROUPPER
         code.write(&[0xC3])?;              // ret
         Ok(())
     }
