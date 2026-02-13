@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use crate::lowering::target::{MicroOp, SimdWidth, VReg, LoweringError};
+use crate::rif::ScalarType;
 
 /// VEX prefix encoding.
 #[derive(Clone, Copy)]
@@ -309,6 +310,53 @@ impl X86_64Encoder {
         Ok(self.pos - start)
     }
 
+    /// VPSHUFB ymm, ymm, ymm — byte shuffle within 128-bit lanes
+    pub fn emit_vpshufb(&mut self, dst: VReg, src: VReg, mask: VReg) -> Result<usize, LoweringError> {
+        let start = self.pos;
+        let vvvv = (!ymm(src)) & 0xF;
+        // VEX.256.66.0F38 00 /r
+        self.emit(&[0xC4, 0xE2, (vvvv << 3) | 0x05, 0x00])?;
+        self.emit(&[modrm(0b11, ymm(dst) & 7, ymm(mask) & 7)])?;
+        Ok(self.pos - start)
+    }
+
+    /// Materialize byte-swap shuffle mask in scratch (YMM15), then VPSHUFB dst, src, YMM15.
+    /// Mask depends on scalar element width.
+    pub fn emit_bswap_vector(&mut self, dst: VReg, src: VReg, scalar_type: ScalarType) -> Result<usize, LoweringError> {
+        let start = self.pos;
+        let scratch = VReg(15);
+
+        let (lo, hi): (u64, u64) = match scalar_type.size_bytes() {
+            8 => (0x0001020304050607u64, 0x08090A0B0C0D0E0Fu64),
+            4 => (0x0405060700010203u64, 0x0C0D0E0F08090A0Bu64),
+            2 => (0x0607040502030001u64, 0x0E0F0C0D0A0B0809u64),
+            _ => return Ok(0), // U8 byte-swap is identity
+        };
+
+        // MOV RAX, lo; VMOVQ xmm15, rax
+        self.emit(&[0x48, 0xB8])?;
+        self.emit(&lo.to_le_bytes())?;
+        self.emit(&[0xC4, 0xE1, 0xF9, 0x6E, modrm(0b11, ymm(scratch) & 7, 0)])?;
+
+        // MOV RAX, hi; VPINSRQ xmm15, xmm15, rax, 1
+        self.emit(&[0x48, 0xB8])?;
+        self.emit(&hi.to_le_bytes())?;
+        // VEX.128.66.0F3A 22 /r ib
+        let vvvv_ins = (!ymm(scratch)) & 0xF;
+        self.emit(&[0xC4, 0xE3, (vvvv_ins << 3) | 0x01, 0x22])?;
+        self.emit(&[modrm(0b11, ymm(scratch) & 7, 0)])?; // xmm15, rax
+        self.emit(&[0x01])?; // imm8 = 1 (insert into qword 1)
+
+        // VINSERTI128 ymm15, ymm15, xmm15, 1 — replicate low 128 to high 128
+        let vvvv_vi = (!ymm(scratch)) & 0xF;
+        self.emit(&[0xC4, 0xE3, (vvvv_vi << 3) | 0x05, 0x38])?;
+        self.emit(&[modrm(0b11, ymm(scratch) & 7, ymm(scratch) & 7)])?;
+        self.emit(&[0x01])?; // imm8 = 1
+
+        self.emit_vpshufb(dst, src, scratch)?;
+        Ok(self.pos - start)
+    }
+
     /// VPTEST ymm, ymm
     pub fn emit_vptest(&mut self, src1: VReg, src2: VReg) -> Result<usize, LoweringError> {
         let start = self.pos;
@@ -411,8 +459,8 @@ impl X86_64Encoder {
             MicroOp::Xor { dst, src1, src2 } => {
                 self.emit_vpxor(*dst, *src1, *src2)
             }
-            MicroOp::ByteSwap { dst: _, src: _, scalar_type: _ } => {
-                Ok(0)
+            MicroOp::ByteSwap { dst, src, scalar_type } => {
+                self.emit_bswap_vector(*dst, *src, *scalar_type)
             }
             MicroOp::Nop { bytes } => {
                 let nop_bytes = match bytes {

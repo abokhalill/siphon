@@ -913,8 +913,8 @@ impl LoweringEngine {
             MicroOp::Xor { dst, src1, src2 } => {
                 self.emit_vpxor(code, *dst, *src1, *src2)
             }
-            MicroOp::ByteSwap { dst: _, src: _, scalar_type: _ } => {
-                Ok(())
+            MicroOp::ByteSwap { dst, src, scalar_type } => {
+                self.emit_batch_bswap(code, *dst, *src, *scalar_type)
             }
             MicroOp::Nop { bytes } => {
                 self.emit_nop(code, *bytes)
@@ -947,6 +947,52 @@ impl LoweringEngine {
         let modrm = 0x80 | ((src_reg & 7) << 3);
         code.write(&[modrm])?;
         code.write(&offset.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn emit_batch_bswap(&self, code: &mut ExecutableBuffer, dst: VReg, src: VReg, scalar_type: ScalarType) -> Result<(), LoweringError> {
+        let scratch = VReg(15);
+
+        let (lo, hi): (u64, u64) = match scalar_type.size_bytes() {
+            8 => (0x0001020304050607u64, 0x08090A0B0C0D0E0Fu64),
+            4 => (0x0405060700010203u64, 0x0C0D0E0F08090A0Bu64),
+            2 => (0x0607040502030001u64, 0x0E0F0C0D0A0B0809u64),
+            _ => return Ok(()), // U8 byte-swap is identity
+        };
+
+        // MOV RAX, lo; VMOVQ xmm15, rax
+        code.write(&[0x48, 0xB8])?;
+        code.write(&lo.to_le_bytes())?;
+        let scratch_reg = scratch.0 & 0x0F;
+        code.write(&[0xC4, 0xE1, 0xF9, 0x6E, 0xC0 | ((scratch_reg & 7) << 3)])?;
+
+        // MOV RAX, hi; VPINSRQ xmm15, xmm15, rax, 1
+        code.write(&[0x48, 0xB8])?;
+        code.write(&hi.to_le_bytes())?;
+        let vvvv_ins = (!(scratch_reg) & 0x0F) << 3;
+        code.write(&[0xC4, 0xE3, vvvv_ins | 0x01, 0x22])?;
+        code.write(&[0xC0 | ((scratch_reg & 7) << 3)])?;
+        code.write(&[0x01])?;
+
+        // VINSERTI128 ymm15, ymm15, xmm15, 1
+        let vvvv_vi = (!(scratch_reg) & 0x0F) << 3;
+        code.write(&[0xC4, 0xE3, vvvv_vi | 0x05, 0x38])?;
+        code.write(&[0xC0 | ((scratch_reg & 7) << 3) | (scratch_reg & 7)])?;
+        code.write(&[0x01])?;
+
+        // VPSHUFB dst, src, ymm15
+        let dst_reg = dst.0 & 0x0F;
+        let src_reg = src.0 & 0x0F;
+        let vvvv_shuf = (!(src_reg) & 0x0F) << 3;
+        if dst_reg < 8 && scratch_reg < 8 {
+            code.write(&[0xC4, 0xE2, vvvv_shuf | 0x05, 0x00])?;
+        } else {
+            let r = if dst_reg < 8 { 0x80 } else { 0x00 };
+            let b = if scratch_reg < 8 { 0x20 } else { 0x00 };
+            code.write(&[0xC4, r | 0x40 | b | 0x02, vvvv_shuf | 0x05, 0x00])?;
+        }
+        code.write(&[0xC0 | ((dst_reg & 7) << 3) | (scratch_reg & 7)])?;
+
         Ok(())
     }
 
