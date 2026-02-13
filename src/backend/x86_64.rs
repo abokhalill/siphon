@@ -194,6 +194,24 @@ impl X86_64Encoder {
         Ok(self.pos - start)
     }
 
+    /// VPANDN ymm, ymm, ymm — dst = ~src1 & src2
+    pub fn emit_vpandn(&mut self, dst: VReg, src1: VReg, src2: VReg) -> Result<usize, LoweringError> {
+        let start = self.pos;
+        let vvvv = (!ymm(src1)) & 0xF;
+        self.emit(&[0xC5, (vvvv << 3) | 0x05, 0xDF])?;
+        self.emit(&[modrm(0b11, ymm(dst) & 7, ymm(src2) & 7)])?;
+        Ok(self.pos - start)
+    }
+
+    /// VPCMPEQD ymm, ymm, ymm — with same operand produces all-ones
+    pub fn emit_vpcmpeqd(&mut self, dst: VReg, src1: VReg, src2: VReg) -> Result<usize, LoweringError> {
+        let start = self.pos;
+        let vvvv = (!ymm(src1)) & 0xF;
+        self.emit(&[0xC5, (vvvv << 3) | 0x05, 0x76])?;
+        self.emit(&[modrm(0b11, ymm(dst) & 7, ymm(src2) & 7)])?;
+        Ok(self.pos - start)
+    }
+
     /// VPAND ymm, ymm, ymm
     pub fn emit_vpand(&mut self, dst: VReg, src1: VReg, src2: VReg) -> Result<usize, LoweringError> {
         let start = self.pos;
@@ -360,7 +378,9 @@ impl X86_64Encoder {
                 self.emit_vpor(*dst, *src1, *src2)
             }
             MicroOp::MaskNot { dst, src } => {
-                self.emit_vpxor(*dst, *src, *src)
+                let scratch = VReg(15);
+                self.emit_vpcmpeqd(scratch, scratch, scratch)?;
+                self.emit_vpandn(*dst, *src, scratch)
             }
             MicroOp::Select { dst, mask, true_val, false_val, scalar_type: _ } => {
                 self.emit_vblendvpd(*dst, *false_val, *true_val, *mask)

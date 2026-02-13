@@ -891,7 +891,9 @@ impl LoweringEngine {
                 self.emit_vpor(code, *dst, *src1, *src2)
             }
             MicroOp::MaskNot { dst, src } => {
-                self.emit_vpxor(code, *dst, *src, *src)
+                let scratch = VReg(15);
+                self.emit_vpcmpeqd(code, scratch, scratch, scratch)?;
+                self.emit_vpandn(code, *dst, *src, scratch)
             }
             MicroOp::Select { dst, mask, true_val, false_val, scalar_type: _ } => {
                 self.emit_vblendvpd(code, *dst, *false_val, *true_val, *mask)
@@ -1206,7 +1208,7 @@ impl LoweringEngine {
 
     fn emit_scalar_mask_not(&self, code: &mut ExecutableBuffer, dst: VReg, src: VReg) -> Result<(), LoweringError> {
         self.emit_load_vreg_to_rax(code, src)?;
-        code.write(&[0x48, 0x83, 0xF0, 0x01])?;
+        code.write(&[0x48, 0xF7, 0xD0])?;  // NOT RAX
         self.emit_store_rax_to_vreg(code, dst)
     }
 
@@ -1449,6 +1451,60 @@ impl LoweringEngine {
         let modrm = 0xC0 | ((dst_reg & 7) << 3) | (src2_reg & 7);
         code.write(&[modrm])?;
         
+        Ok(())
+    }
+
+    /// VPANDN ymm, ymm, ymm — dst = ~src1 & src2
+    #[allow(dead_code)]
+    fn emit_vpandn(&self, code: &mut ExecutableBuffer, dst: VReg, src1: VReg, src2: VReg) -> Result<(), LoweringError> {
+        let dst_reg = dst.0 & 0x0F;
+        let src1_reg = src1.0 & 0x0F;
+        let src2_reg = src2.0 & 0x0F;
+
+        if dst_reg < 8 && src2_reg < 8 {
+            let vvvv = (!(src1_reg) & 0x0F) << 3;
+            let byte1 = 0x80 | vvvv | 0x05;
+            code.write(&[0xC5, byte1])?;
+        } else {
+            let r = if dst_reg < 8 { 0x80 } else { 0x00 };
+            let b = if src2_reg < 8 { 0x20 } else { 0x00 };
+            let byte1 = r | 0x40 | b | 0x01;
+            let vvvv = (!(src1_reg) & 0x0F) << 3;
+            let byte2 = vvvv | 0x05;
+            code.write(&[0xC4, byte1, byte2])?;
+        }
+
+        code.write(&[0xDF])?;
+        let modrm = 0xC0 | ((dst_reg & 7) << 3) | (src2_reg & 7);
+        code.write(&[modrm])?;
+
+        Ok(())
+    }
+
+    /// VPCMPEQD ymm, ymm, ymm — with same operand produces all-ones
+    #[allow(dead_code)]
+    fn emit_vpcmpeqd(&self, code: &mut ExecutableBuffer, dst: VReg, src1: VReg, src2: VReg) -> Result<(), LoweringError> {
+        let dst_reg = dst.0 & 0x0F;
+        let src1_reg = src1.0 & 0x0F;
+        let src2_reg = src2.0 & 0x0F;
+
+        if dst_reg < 8 && src2_reg < 8 {
+            let vvvv = (!(src1_reg) & 0x0F) << 3;
+            let byte1 = 0x80 | vvvv | 0x05;
+            code.write(&[0xC5, byte1])?;
+        } else {
+            let r = if dst_reg < 8 { 0x80 } else { 0x00 };
+            let b = if src2_reg < 8 { 0x20 } else { 0x00 };
+            let byte1 = r | 0x40 | b | 0x01;
+            let vvvv = (!(src1_reg) & 0x0F) << 3;
+            let byte2 = vvvv | 0x05;
+            code.write(&[0xC4, byte1, byte2])?;
+        }
+
+        code.write(&[0x76])?;
+        let modrm = 0xC0 | ((dst_reg & 7) << 3) | (src2_reg & 7);
+        code.write(&[modrm])?;
+
         Ok(())
     }
 
