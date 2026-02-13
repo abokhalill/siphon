@@ -52,6 +52,11 @@ impl ScalarType {
     }
 
     #[inline]
+    pub const fn is_unsigned(self) -> bool {
+        matches!(self, ScalarType::U8 | ScalarType::U16 | ScalarType::U32 | ScalarType::U64)
+    }
+
+    #[inline]
     pub const fn discriminant(self) -> u8 {
         self as u8
     }

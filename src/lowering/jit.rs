@@ -881,11 +881,19 @@ impl LoweringEngine {
             MicroOp::BroadcastImm { dst, value, scalar_type } => {
                 self.emit_broadcast_imm64(code, *dst, *value, *scalar_type)
             }
-            MicroOp::ValidateCmpGt { dst_mask, src, comparand, scalar_type: _ } => {
-                self.emit_vpcmpgtq(code, *dst_mask, *src, *comparand)
+            MicroOp::ValidateCmpGt { dst_mask, src, comparand, scalar_type } => {
+                if scalar_type.is_unsigned() {
+                    self.emit_unsigned_cmpgt_batch(code, *dst_mask, *src, *comparand)
+                } else {
+                    self.emit_vpcmpgtq(code, *dst_mask, *src, *comparand)
+                }
             }
-            MicroOp::ValidateCmpLt { dst_mask, src, comparand, scalar_type: _ } => {
-                self.emit_vpcmpgtq(code, *dst_mask, *comparand, *src)
+            MicroOp::ValidateCmpLt { dst_mask, src, comparand, scalar_type } => {
+                if scalar_type.is_unsigned() {
+                    self.emit_unsigned_cmpgt_batch(code, *dst_mask, *comparand, *src)
+                } else {
+                    self.emit_vpcmpgtq(code, *dst_mask, *comparand, *src)
+                }
             }
             MicroOp::ValidateCmpEq { dst_mask, src, imm_or_reg, scalar_type: _ } => {
                 self.emit_vpcmpeqq(code, *dst_mask, *src, *imm_or_reg)
@@ -959,6 +967,16 @@ impl LoweringEngine {
         Ok(())
     }
 
+    fn emit_unsigned_cmpgt_batch(&self, code: &mut ExecutableBuffer, dst: VReg, src: VReg, comparand: VReg) -> Result<(), LoweringError> {
+        let sign_bit = VReg(15);
+        let tmp_a = VReg(14);
+
+        self.emit_broadcast_imm64(code, sign_bit, 0x8000000000000000u64, ScalarType::U64)?;
+        self.emit_vpxor(code, tmp_a, src, sign_bit)?;
+        self.emit_vpxor(code, sign_bit, comparand, sign_bit)?;
+        self.emit_vpcmpgtq(code, dst, tmp_a, sign_bit)
+    }
+
     fn emit_batch_bswap(&self, code: &mut ExecutableBuffer, dst: VReg, src: VReg, scalar_type: ScalarType) -> Result<(), LoweringError> {
         let scratch = VReg(15);
 
@@ -1016,11 +1034,11 @@ impl LoweringEngine {
             MicroOp::BroadcastImm { dst, value, scalar_type: _ } => {
                 self.emit_scalar_const(code, *dst, *value)
             }
-            MicroOp::ValidateCmpGt { dst_mask, src, comparand, scalar_type: _ } => {
-                self.emit_scalar_cmp_gt(code, *dst_mask, *src, *comparand)
+            MicroOp::ValidateCmpGt { dst_mask, src, comparand, scalar_type } => {
+                self.emit_scalar_cmp_gt(code, *dst_mask, *src, *comparand, *scalar_type)
             }
-            MicroOp::ValidateCmpLt { dst_mask, src, comparand, scalar_type: _ } => {
-                self.emit_scalar_cmp_lt(code, *dst_mask, *src, *comparand)
+            MicroOp::ValidateCmpLt { dst_mask, src, comparand, scalar_type } => {
+                self.emit_scalar_cmp_lt(code, *dst_mask, *src, *comparand, *scalar_type)
             }
             MicroOp::ValidateCmpEq { dst_mask, src, imm_or_reg, scalar_type: _ } => {
                 self.emit_scalar_cmp_eq(code, *dst_mask, *src, *imm_or_reg)
@@ -1205,22 +1223,28 @@ impl LoweringEngine {
         Ok(())
     }
 
-    fn emit_scalar_cmp_gt(&self, code: &mut ExecutableBuffer, dst_mask: VReg, src: VReg, comparand: VReg) -> Result<(), LoweringError> {
+    fn emit_scalar_cmp_gt(&self, code: &mut ExecutableBuffer, dst_mask: VReg, src: VReg, comparand: VReg, scalar_type: ScalarType) -> Result<(), LoweringError> {
         self.emit_load_vreg_to_rax(code, src)?;
         self.emit_load_vreg_to_rcx(code, comparand)?;
         code.write(&[0x48, 0x39, 0xC8])?;  // CMP RAX, RCX
-        code.write(&[0x0F, 0x9F, 0xC0])?;  // SETG AL
+        if scalar_type.is_unsigned() {
+            code.write(&[0x0F, 0x97, 0xC0])?;  // SETA AL
+        } else {
+            code.write(&[0x0F, 0x9F, 0xC0])?;  // SETG AL
+        }
         code.write(&[0x48, 0x0F, 0xB6, 0xC0])?;
         self.emit_store_rax_to_vreg(code, dst_mask)
     }
 
-    fn emit_scalar_cmp_lt(&self, code: &mut ExecutableBuffer, dst_mask: VReg, src: VReg, comparand: VReg) -> Result<(), LoweringError> {
+    fn emit_scalar_cmp_lt(&self, code: &mut ExecutableBuffer, dst_mask: VReg, src: VReg, comparand: VReg, scalar_type: ScalarType) -> Result<(), LoweringError> {
         self.emit_load_vreg_to_rax(code, src)?;
         self.emit_load_vreg_to_rcx(code, comparand)?;
-        // CMP RAX, RCX
-        code.write(&[0x48, 0x39, 0xC8])?;
-        code.write(&[0x0F, 0x9C, 0xC0])?;
-        // MOVZX RAX, AL
+        code.write(&[0x48, 0x39, 0xC8])?;  // CMP RAX, RCX
+        if scalar_type.is_unsigned() {
+            code.write(&[0x0F, 0x92, 0xC0])?;  // SETB AL
+        } else {
+            code.write(&[0x0F, 0x9C, 0xC0])?;  // SETL AL
+        }
         code.write(&[0x48, 0x0F, 0xB6, 0xC0])?;
         self.emit_store_rax_to_vreg(code, dst_mask)
     }

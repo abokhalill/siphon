@@ -266,6 +266,21 @@ impl X86_64Encoder {
         Ok(self.pos - start)
     }
 
+    /// Unsigned VPCMPGTQ via sign-flip trick: XOR both operands with 0x8000000000000000,
+    /// then signed compare. Uses YMM14/YMM15 as scratch.
+    pub fn emit_unsigned_cmpgt(&mut self, dst: VReg, src: VReg, comparand: VReg) -> Result<usize, LoweringError> {
+        let start = self.pos;
+        let sign_bit = VReg(15);
+        let tmp_a = VReg(14);
+
+        self.emit_vpbroadcastq_imm(sign_bit, 0x8000000000000000u64)?;
+        self.emit_vpxor(tmp_a, src, sign_bit)?;
+        self.emit_vpxor(sign_bit, comparand, sign_bit)?;
+        self.emit_vpcmpgtq(dst, tmp_a, sign_bit)?;
+
+        Ok(self.pos - start)
+    }
+
     /// VPBROADCASTQ ymm, imm64 — via RAX scratch
     pub fn emit_vpbroadcastq_imm(&mut self, dst: VReg, value: u64) -> Result<usize, LoweringError> {
         let start = self.pos;
@@ -410,11 +425,19 @@ impl X86_64Encoder {
             MicroOp::ValidateCmpEq { dst_mask, src, imm_or_reg, scalar_type: _ } => {
                 self.emit_vpcmpeqq(*dst_mask, *src, *imm_or_reg)
             }
-            MicroOp::ValidateCmpGt { dst_mask, src, comparand, scalar_type: _ } => {
-                self.emit_vpcmpgtq(*dst_mask, *src, *comparand)
+            MicroOp::ValidateCmpGt { dst_mask, src, comparand, scalar_type } => {
+                if scalar_type.is_unsigned() {
+                    self.emit_unsigned_cmpgt(*dst_mask, *src, *comparand)
+                } else {
+                    self.emit_vpcmpgtq(*dst_mask, *src, *comparand)
+                }
             }
-            MicroOp::ValidateCmpLt { dst_mask, src, comparand, scalar_type: _ } => {
-                self.emit_vpcmpgtq(*dst_mask, *comparand, *src)
+            MicroOp::ValidateCmpLt { dst_mask, src, comparand, scalar_type } => {
+                if scalar_type.is_unsigned() {
+                    self.emit_unsigned_cmpgt(*dst_mask, *comparand, *src)
+                } else {
+                    self.emit_vpcmpgtq(*dst_mask, *comparand, *src)
+                }
             }
             MicroOp::ValidateNonZero { dst_mask: _, src, scalar_type: _ } => {
                 self.emit_vptest(*src, *src)
