@@ -590,6 +590,7 @@ impl LoweringEngine {
                 };
                 witness.record(node_idx, &op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
                 ops.push(op)?;
+                witness.set_mask_reg(dst_mask, witness.current_mask());
             }
             Constraint::NonZero => {
                 let op = MicroOp::ValidateNonZero {
@@ -599,6 +600,7 @@ impl LoweringEngine {
                 };
                 witness.record(node_idx, &op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
                 ops.push(op)?;
+                witness.set_mask_reg(dst_mask, witness.current_mask());
             }
             Constraint::Range { lo, hi } => {
                 let lo_reg = regalloc.alloc()?;
@@ -641,6 +643,9 @@ impl LoweringEngine {
                 ops.push(le_op)?;
                 regalloc.free(hi_reg);
 
+                witness.set_mask_reg(ge_mask, witness.current_mask());
+                witness.set_mask_reg(le_mask, witness.current_mask());
+
                 let and_op = MicroOp::MaskAnd {
                     dst: dst_mask,
                     src1: ge_mask,
@@ -650,6 +655,7 @@ impl LoweringEngine {
                 ops.push(and_op)?;
                 regalloc.free(ge_mask);
                 regalloc.free(le_mask);
+                witness.set_mask_reg(dst_mask, witness.current_mask());
             }
             Constraint::Finite => {
                 return Err(LoweringError::UnsupportedNode);
@@ -692,8 +698,7 @@ impl LoweringEngine {
             ops.push(op)?;
         }
 
-        let new_mask = witness.current_mask().and(LaneMask(0xFF));
-        witness.refine_mask(new_mask).map_err(|_| LoweringError::InvalidMaskChain)?;
+        let new_mask = witness.current_mask();
         witness.set_mask_reg(dst, new_mask);
 
         regalloc.bind(node_idx, dst)?;
