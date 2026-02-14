@@ -66,20 +66,22 @@ pub enum LoadContract {
 
 impl LoadContract {
     pub fn for_load(offset: u32, width: SimdWidth, mask: Option<VReg>, packet_len: u16) -> Self {
-        let load_end = offset as u64 + width.bytes() as u64;
-        
+        let load_bytes = width.bytes() as u64;
+        let load_end = offset as u64 + load_bytes;
+
         if mask.is_none() && load_end <= packet_len as u64 {
-            let page_start = offset & !0xFFF;
-            let page_end = page_start + 0x1000;
-            if load_end <= page_end as u64 {
+            // Page-crossing check: first and last byte must be on the same 4KB page
+            let first_page = (offset as u64) >> 12;
+            let last_page = (offset as u64 + load_bytes - 1) >> 12;
+            if first_page == last_page {
                 return LoadContract::UnmaskedUnchecked;
             }
         }
-        
+
         if mask.is_some() {
             return LoadContract::MaskedFaultSafe;
         }
-        
+
         LoadContract::ScalarPeel
     }
 }
