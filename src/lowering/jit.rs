@@ -873,8 +873,8 @@ impl LoweringEngine {
 
     fn emit_batch_microop(&self, op: &MicroOp, code: &mut ExecutableBuffer) -> Result<(), LoweringError> {
         match op {
-            MicroOp::LoadVector { dst, offset, width: _, scalar_type: _, mask: _ } => {
-                self.emit_batch_load(code, *dst, *offset)
+            MicroOp::LoadVector { dst, offset, width: _, scalar_type, mask: _ } => {
+                self.emit_batch_load(code, *dst, *offset, *scalar_type)
             }
             MicroOp::Emit { src, field_offset, scalar_type: _, mask: _ } => {
                 self.emit_batch_store(code, *src, *field_offset as u32)
@@ -940,17 +940,63 @@ impl LoweringEngine {
         }
     }
 
-    fn emit_batch_load(&self, code: &mut ExecutableBuffer, dst: VReg, offset: u32) -> Result<(), LoweringError> {
+    fn emit_batch_load(&self, code: &mut ExecutableBuffer, dst: VReg, offset: u32, scalar_type: ScalarType) -> Result<(), LoweringError> {
         let dst_reg = dst.0 & 0x0F;
         code.write(&[0x49, 0x8B, 0x04, 0x24])?;  // mov rax, [r12]
-        if dst_reg < 8 {
-            code.write(&[0xC4, 0xE2, 0x7D, 0x19])?;
-        } else {
-            code.write(&[0xC4, 0x62, 0x7D, 0x19])?;
+
+        match scalar_type.size_bytes() {
+            8 => {
+                // VBROADCASTSD ymm, [rax+disp32] — 8-byte load, broadcast to 4 qwords
+                if dst_reg < 8 {
+                    code.write(&[0xC4, 0xE2, 0x7D, 0x19])?;
+                } else {
+                    code.write(&[0xC4, 0x62, 0x7D, 0x19])?;
+                }
+                let modrm = 0x80 | ((dst_reg & 7) << 3);
+                code.write(&[modrm])?;
+                code.write(&offset.to_le_bytes())?;
+            }
+            4 => {
+                // MOV EAX, [RAX+disp32] — 4-byte load, zero-extended
+                code.write(&[0x8B, 0x80])?;
+                code.write(&offset.to_le_bytes())?;
+                // VMOVD xmm(dst), EAX
+                code.write(&[0xC5, 0xF9, 0x6E, 0xC0 | ((dst_reg & 7) << 3)])?;
+                // VPBROADCASTD ymm(dst), xmm(dst)
+                if dst_reg < 8 {
+                    code.write(&[0xC4, 0xE2, 0x7D, 0x58, 0xC0 | ((dst_reg & 7) << 3) | (dst_reg & 7)])?;
+                } else {
+                    code.write(&[0xC4, 0x62, 0x7D, 0x58, 0xC0 | ((dst_reg & 7) << 3) | (dst_reg & 7)])?;
+                }
+            }
+            2 => {
+                // MOVZX EAX, word [RAX+disp32] — 2-byte load, zero-extended
+                code.write(&[0x0F, 0xB7, 0x80])?;
+                code.write(&offset.to_le_bytes())?;
+                // VMOVD xmm(dst), EAX
+                code.write(&[0xC5, 0xF9, 0x6E, 0xC0 | ((dst_reg & 7) << 3)])?;
+                // VPBROADCASTW ymm(dst), xmm(dst)
+                if dst_reg < 8 {
+                    code.write(&[0xC4, 0xE2, 0x7D, 0x79, 0xC0 | ((dst_reg & 7) << 3) | (dst_reg & 7)])?;
+                } else {
+                    code.write(&[0xC4, 0x62, 0x7D, 0x79, 0xC0 | ((dst_reg & 7) << 3) | (dst_reg & 7)])?;
+                }
+            }
+            _ => {
+                // U8: MOVZX EAX, byte [RAX+disp32] — 1-byte load, zero-extended
+                code.write(&[0x0F, 0xB6, 0x80])?;
+                code.write(&offset.to_le_bytes())?;
+                // VMOVD xmm(dst), EAX
+                code.write(&[0xC5, 0xF9, 0x6E, 0xC0 | ((dst_reg & 7) << 3)])?;
+                // VPBROADCASTB ymm(dst), xmm(dst)
+                if dst_reg < 8 {
+                    code.write(&[0xC4, 0xE2, 0x7D, 0x78, 0xC0 | ((dst_reg & 7) << 3) | (dst_reg & 7)])?;
+                } else {
+                    code.write(&[0xC4, 0x62, 0x7D, 0x78, 0xC0 | ((dst_reg & 7) << 3) | (dst_reg & 7)])?;
+                }
+            }
         }
-        let modrm = 0x80 | ((dst_reg & 7) << 3);
-        code.write(&[modrm])?;
-        code.write(&offset.to_le_bytes())?;
+
         Ok(())
     }
 
