@@ -545,15 +545,15 @@ pub const ICACHE_WARNING_THRESHOLD: usize = 14 * 1024;
 /// MicroOp stream with I-cache budget tracking.
 /// Fixed capacity, no heap growth.
 pub struct MicroOpStream {
-    ops: [MicroOp; 2048], // ~2K ops max, should be plenty
+    ops: Box<[MicroOp; 2048]>, // ~32KB, heap-allocated
     len: usize,
     footprint: usize,
 }
 
 impl MicroOpStream {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            ops: [MicroOp::Nop { bytes: 0 }; 2048],
+            ops: Box::new([MicroOp::Nop { bytes: 0 }; 2048]),
             len: 0,
             footprint: 0,
         }

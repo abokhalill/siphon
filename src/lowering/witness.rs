@@ -34,7 +34,7 @@ impl WitnessEntry {
 
 /// Complete witness. 4096 entries max—if you need more, rethink your life choices.
 pub struct Witness {
-    entries: [WitnessEntry; 4096],
+    entries: Box<[WitnessEntry; 4096]>, // ~49KB, heap-allocated
     len: usize,
     phase_a_hash: SemanticHash,
     phase_b_hash: Option<SemanticHash>,
@@ -43,13 +43,13 @@ pub struct Witness {
 impl Witness {
     pub fn new(phase_a_hash: SemanticHash) -> Self {
         Self {
-            entries: [WitnessEntry {
+            entries: Box::new([WitnessEntry {
                 rif_node: NodeIndex(0),
                 microop_idx: 0,
                 mask_before: LaneMask::NONE,
                 mask_after: LaneMask::NONE,
                 microop_tag: 0,
-            }; 4096],
+            }; 4096]),
             len: 0,
             phase_a_hash,
             phase_b_hash: None,
