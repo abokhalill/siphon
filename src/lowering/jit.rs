@@ -94,7 +94,7 @@ pub struct ExecutableBuffer {
 }
 
 impl ExecutableBuffer {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     pub fn new(capacity: usize) -> Result<Self, LoweringError> {
         use std::ptr;
         
@@ -125,7 +125,7 @@ impl ExecutableBuffer {
         })
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     pub fn new(capacity: usize) -> Result<Self, LoweringError> {
         let layout = std::alloc::Layout::from_size_align(capacity, 4096)
             .map_err(|_| LoweringError::WitnessGenerationFailed)?;
@@ -156,7 +156,7 @@ impl ExecutableBuffer {
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     pub fn make_executable(&mut self) -> Result<(), LoweringError> {
         let result = unsafe {
             libc::mprotect(
@@ -172,7 +172,7 @@ impl ExecutableBuffer {
         Ok(())
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     pub fn make_executable(&mut self) -> Result<(), LoweringError> {
         Ok(())
     }
@@ -191,14 +191,14 @@ impl ExecutableBuffer {
 }
 
 impl Drop for ExecutableBuffer {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     fn drop(&mut self) {
         unsafe {
             libc::munmap(self.ptr as *mut libc::c_void, self.capacity);
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     fn drop(&mut self) {
         let layout = std::alloc::Layout::from_size_align(self.capacity, 4096).unwrap();
         unsafe {
