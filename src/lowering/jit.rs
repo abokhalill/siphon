@@ -1483,7 +1483,7 @@ impl LoweringEngine {
         let byte1 = r | 0x40 | b | 0x02; // R.1.B.00010
         
         let vvvv = (!(src1_reg) & 0x0F) << 3;
-        let byte2 = 0x80 | vvvv | 0x05; // W=1, vvvv, L=1, pp=01
+        let byte2 = vvvv | 0x05; // W=0, vvvv, L=1, pp=01
         
         code.write(&[0xC4, byte1, byte2])?;
         code.write(&[0x37])?;
