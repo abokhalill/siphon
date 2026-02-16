@@ -211,10 +211,10 @@ pub struct PacketDesc {
 #[cfg(target_os = "linux")]
 pub struct PacketLoop {
     ring_fd: i32,
-    #[allow(dead_code)]
-    cq_ring: *mut u8,
-    #[allow(dead_code)]
     sq_ring: *mut u8,
+    sq_ring_size: usize,
+    cq_ring: *mut u8,
+    cq_ring_size: usize,
     cq_head: *mut u32,
     cq_tail: *mut u32,
     cq_mask: u32,
@@ -286,8 +286,10 @@ impl PacketLoop {
         
         Ok(Self {
             ring_fd,
-            cq_ring,
             sq_ring,
+            sq_ring_size: sq_size,
+            cq_ring,
+            cq_ring_size: cq_size,
             cq_head,
             cq_tail,
             cq_mask,
@@ -339,11 +341,19 @@ impl PacketLoop {
             let buffer_id = cqe.user_data as u32;
             let len = if cqe.res > 0 { cqe.res as u32 } else { 0 };
             
-            self.batch[i] = PacketDesc {
-                data: self.buffers.buffer_ptr(buffer_id),
-                len,
-                buffer_id,
-            };
+            if buffer_id < self.buffers.count() {
+                self.batch[i] = PacketDesc {
+                    data: self.buffers.buffer_ptr(buffer_id),
+                    len,
+                    buffer_id,
+                };
+            } else {
+                self.batch[i] = PacketDesc {
+                    data: ptr::null(),
+                    len: 0,
+                    buffer_id: 0,
+                };
+            }
         }
         
         unsafe {
@@ -381,6 +391,8 @@ impl PacketLoop {
 impl Drop for PacketLoop {
     fn drop(&mut self) {
         unsafe {
+            libc::munmap(self.sq_ring as *mut libc::c_void, self.sq_ring_size);
+            libc::munmap(self.cq_ring as *mut libc::c_void, self.cq_ring_size);
             libc::close(self.ring_fd);
         }
     }
@@ -397,7 +409,9 @@ pub struct RegisteredBuffers {
 #[cfg(target_os = "linux")]
 impl RegisteredBuffers {
     pub fn new(count: u32, buffer_size: u32) -> Result<Self, IoUringError> {
-        let total_size = (count as usize) * (buffer_size as usize);
+        let total_size = (count as usize)
+            .checked_mul(buffer_size as usize)
+            .ok_or(IoUringError::BufferAllocFailed)?;
         
         let memory = unsafe {
             libc::mmap(
@@ -466,6 +480,11 @@ impl RegisteredBuffers {
         }
         
         Ok(())
+    }
+
+    #[inline]
+    pub fn count(&self) -> u32 {
+        self.count
     }
 
     pub fn buffer_ptr(&self, idx: u32) -> *const u8 {
