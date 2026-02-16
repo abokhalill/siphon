@@ -1034,23 +1034,25 @@ impl LoweringEngine {
             _ => return Ok(()), // U8 byte-swap is identity
         };
 
-        // MOV RAX, lo; VMOVQ xmm15, rax
+        let scratch_reg = scratch.0 & 0x0F;
+        let r_inv = if scratch_reg < 8 { 0x80u8 } else { 0x00u8 };
+        let b_inv = if scratch_reg < 8 { 0x20u8 } else { 0x00u8 };
+        let vvvv_inv = ((!scratch_reg) & 0x0F) << 3;
+
+        // MOV RAX, lo; VMOVQ xmm(scratch), rax — VEX.128.66.0F.W1 6E /r
         code.write(&[0x48, 0xB8])?;
         code.write(&lo.to_le_bytes())?;
-        let scratch_reg = scratch.0 & 0x0F;
-        code.write(&[0xC4, 0xE1, 0xF9, 0x6E, 0xC0 | ((scratch_reg & 7) << 3)])?;
+        code.write(&[0xC4, r_inv | 0x61, 0xF9, 0x6E, 0xC0 | ((scratch_reg & 7) << 3)])?;
 
-        // MOV RAX, hi; VPINSRQ xmm15, xmm15, rax, 1
+        // MOV RAX, hi; VPINSRQ xmm(scratch), xmm(scratch), rax, 1 — VEX.128.66.0F3A.W1 22 /r ib
         code.write(&[0x48, 0xB8])?;
         code.write(&hi.to_le_bytes())?;
-        let vvvv_ins = (!(scratch_reg) & 0x0F) << 3;
-        code.write(&[0xC4, 0xE3, vvvv_ins | 0x01, 0x22])?;
+        code.write(&[0xC4, r_inv | 0x63, vvvv_inv | 0xF9, 0x22])?;
         code.write(&[0xC0 | ((scratch_reg & 7) << 3)])?;
         code.write(&[0x01])?;
 
-        // VINSERTI128 ymm15, ymm15, xmm15, 1
-        let vvvv_vi = (!(scratch_reg) & 0x0F) << 3;
-        code.write(&[0xC4, 0xE3, vvvv_vi | 0x05, 0x38])?;
+        // VINSERTI128 ymm(scratch), ymm(scratch), xmm(scratch), 1 — VEX.256.66.0F3A 38 /r ib
+        code.write(&[0xC4, r_inv | 0x43 | b_inv, vvvv_inv | 0x05, 0x38])?;
         code.write(&[0xC0 | ((scratch_reg & 7) << 3) | (scratch_reg & 7)])?;
         code.write(&[0x01])?;
 
