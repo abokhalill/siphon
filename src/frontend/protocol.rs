@@ -42,16 +42,12 @@ impl Protocol {
         self.fields.push(field);
     }
 
-    pub fn to_rif_graph(&self) -> RifGraph<'static> {
-        let nodes: &'static [RifNode] = Box::leak(self.build_rif_nodes().into_boxed_slice());
-
-        RifGraph {
-            version: RifVersion::CURRENT,
-            protocol_version: self.version as u32,
-            nodes,
-            max_packet_length: self.max_size,
-            version_discriminator_node: NodeIndex(0),
-        }
+    pub fn to_rif_graph(&self) -> OwnedRifGraph {
+        OwnedRifGraph::new(
+            self.build_rif_nodes(),
+            self.version as u32,
+            self.max_size,
+        )
     }
 
     fn build_rif_nodes(&self) -> Vec<RifNode> {
@@ -124,6 +120,35 @@ impl Protocol {
     }
 }
 
+pub struct OwnedRifGraph {
+    nodes: Vec<RifNode>,
+    protocol_version: u32,
+    max_packet_length: u16,
+}
+
+impl OwnedRifGraph {
+    pub fn new(nodes: Vec<RifNode>, protocol_version: u32, max_packet_length: u16) -> Self {
+        Self { nodes, protocol_version, max_packet_length }
+    }
+
+    pub fn as_graph(&self) -> RifGraph<'_> {
+        RifGraph {
+            version: RifVersion::CURRENT,
+            protocol_version: self.protocol_version,
+            nodes: &self.nodes,
+            max_packet_length: self.max_packet_length,
+            version_discriminator_node: NodeIndex(0),
+        }
+    }
+}
+
+impl std::ops::Deref for OwnedRifGraph {
+    type Target = [RifNode];
+    fn deref(&self) -> &[RifNode] {
+        &self.nodes
+    }
+}
+
 impl ProtocolField {
     pub fn new(name: &str, offset: u32, scalar_type: ScalarType) -> Self {
         Self {
@@ -153,7 +178,8 @@ mod tests {
                 .with_constraint(FieldConstraint::Range { lo: 1, hi: 1500 }),
         );
 
-        let graph = proto.to_rif_graph();
+        let owned = proto.to_rif_graph();
+        let graph = owned.as_graph();
         assert!(graph.validate().is_ok());
         assert!(graph.nodes.len() >= 2);
     }
@@ -170,7 +196,8 @@ mod tests {
                 .with_constraint(FieldConstraint::NonZero),
         );
 
-        let graph = proto.to_rif_graph();
+        let owned = proto.to_rif_graph();
+        let graph = owned.as_graph();
         assert!(graph.validate().is_ok());
 
         let guard_count = graph.nodes.iter().filter(|n| matches!(n, RifNode::Guard { .. })).count();
