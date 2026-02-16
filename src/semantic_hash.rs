@@ -326,8 +326,9 @@ impl Blake3State {
         let block_len = if is_final { self.buf_len as u32 } else { 64 };
         let counter = self.total_len / 64;
 
-        let flags = if self.total_len == 0 { 1 } else { 0 }
-            | if is_final { 2 | 8 } else { 0 };
+        let mut flags: u32 = 0;
+        if self.total_len == 0 { flags |= 1; }  // CHUNK_START
+        if is_final { flags |= 2 | 8; }          // CHUNK_END | ROOT
 
         let mut state = [
             self.cv[0], self.cv[1], self.cv[2], self.cv[3],
