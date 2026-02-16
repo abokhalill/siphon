@@ -960,40 +960,34 @@ impl LoweringEngine {
                 // MOV EAX, [RAX+disp32] — 4-byte load, zero-extended
                 code.write(&[0x8B, 0x80])?;
                 code.write(&offset.to_le_bytes())?;
-                // VMOVD xmm(dst), EAX
-                code.write(&[0xC5, 0xF9, 0x6E, 0xC0 | ((dst_reg & 7) << 3)])?;
-                // VPBROADCASTD ymm(dst), xmm(dst)
-                if dst_reg < 8 {
-                    code.write(&[0xC4, 0xE2, 0x7D, 0x58, 0xC0 | ((dst_reg & 7) << 3) | (dst_reg & 7)])?;
-                } else {
-                    code.write(&[0xC4, 0x62, 0x7D, 0x58, 0xC0 | ((dst_reg & 7) << 3) | (dst_reg & 7)])?;
-                }
+                // VMOVD xmm(dst), EAX — VEX.128.66.0F 6E /r
+                let r_inv = if dst_reg < 8 { 0x80u8 } else { 0x00u8 };
+                code.write(&[0xC4, r_inv | 0x61, 0x79, 0x6E, 0xC0 | ((dst_reg & 7) << 3)])?;
+                // VPBROADCASTD ymm(dst), xmm(dst) — VEX.256.66.0F38 58 /r
+                let b_inv = if dst_reg < 8 { 0x20u8 } else { 0x00u8 };
+                code.write(&[0xC4, r_inv | 0x42 | b_inv, 0x7D, 0x58, 0xC0 | ((dst_reg & 7) << 3) | (dst_reg & 7)])?;
             }
             2 => {
                 // MOVZX EAX, word [RAX+disp32] — 2-byte load, zero-extended
                 code.write(&[0x0F, 0xB7, 0x80])?;
                 code.write(&offset.to_le_bytes())?;
                 // VMOVD xmm(dst), EAX
-                code.write(&[0xC5, 0xF9, 0x6E, 0xC0 | ((dst_reg & 7) << 3)])?;
-                // VPBROADCASTW ymm(dst), xmm(dst)
-                if dst_reg < 8 {
-                    code.write(&[0xC4, 0xE2, 0x7D, 0x79, 0xC0 | ((dst_reg & 7) << 3) | (dst_reg & 7)])?;
-                } else {
-                    code.write(&[0xC4, 0x62, 0x7D, 0x79, 0xC0 | ((dst_reg & 7) << 3) | (dst_reg & 7)])?;
-                }
+                let r_inv = if dst_reg < 8 { 0x80u8 } else { 0x00u8 };
+                code.write(&[0xC4, r_inv | 0x61, 0x79, 0x6E, 0xC0 | ((dst_reg & 7) << 3)])?;
+                // VPBROADCASTW ymm(dst), xmm(dst) — VEX.256.66.0F38 79 /r
+                let b_inv = if dst_reg < 8 { 0x20u8 } else { 0x00u8 };
+                code.write(&[0xC4, r_inv | 0x42 | b_inv, 0x7D, 0x79, 0xC0 | ((dst_reg & 7) << 3) | (dst_reg & 7)])?;
             }
             _ => {
                 // U8: MOVZX EAX, byte [RAX+disp32] — 1-byte load, zero-extended
                 code.write(&[0x0F, 0xB6, 0x80])?;
                 code.write(&offset.to_le_bytes())?;
                 // VMOVD xmm(dst), EAX
-                code.write(&[0xC5, 0xF9, 0x6E, 0xC0 | ((dst_reg & 7) << 3)])?;
-                // VPBROADCASTB ymm(dst), xmm(dst)
-                if dst_reg < 8 {
-                    code.write(&[0xC4, 0xE2, 0x7D, 0x78, 0xC0 | ((dst_reg & 7) << 3) | (dst_reg & 7)])?;
-                } else {
-                    code.write(&[0xC4, 0x62, 0x7D, 0x78, 0xC0 | ((dst_reg & 7) << 3) | (dst_reg & 7)])?;
-                }
+                let r_inv = if dst_reg < 8 { 0x80u8 } else { 0x00u8 };
+                code.write(&[0xC4, r_inv | 0x61, 0x79, 0x6E, 0xC0 | ((dst_reg & 7) << 3)])?;
+                // VPBROADCASTB ymm(dst), xmm(dst) — VEX.256.66.0F38 78 /r
+                let b_inv = if dst_reg < 8 { 0x20u8 } else { 0x00u8 };
+                code.write(&[0xC4, r_inv | 0x42 | b_inv, 0x7D, 0x78, 0xC0 | ((dst_reg & 7) << 3) | (dst_reg & 7)])?;
             }
         }
 
