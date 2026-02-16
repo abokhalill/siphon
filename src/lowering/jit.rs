@@ -1153,8 +1153,8 @@ impl LoweringEngine {
             self.emit_load_vreg_to_rcx(code, mask_reg)?;
             code.write(&[0x48, 0x85, 0xC9])?;  // TEST RCX, RCX
             code.write(&[0x74])?;              // JZ rel8 (skip store)
-            // +3 for LFENCE after the branch
-            let skip_offset = self.store_instruction_size(offset, scalar_type) + 7 + 3;
+            let vreg_load_size = self.vreg_load_size(src);
+            let skip_offset = vreg_load_size + self.store_instruction_size(offset, scalar_type) + 3;
             code.write(&[skip_offset as u8])?;
             code.write(&[0x0F, 0xAE, 0xE8])?;  // LFENCE - Spectre mitigation
         }
@@ -1210,6 +1210,11 @@ impl LoweringEngine {
             }
         }
         Ok(())
+    }
+
+    fn vreg_load_size(&self, reg: VReg) -> usize {
+        let stack_offset = -8 * (reg.0 as i32 + 1);
+        if stack_offset >= -128 { 4 } else { 7 }
     }
 
     fn store_instruction_size(&self, offset: u32, scalar_type: ScalarType) -> usize {
