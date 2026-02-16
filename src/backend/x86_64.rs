@@ -5,38 +5,26 @@
 use crate::lowering::target::{MicroOp, SimdWidth, VReg, LoweringError};
 use crate::rif::ScalarType;
 
-/// VEX prefix encoding.
-#[derive(Clone, Copy)]
-struct VexPrefix {
-    rxb: u8,
-    map: u8,
-    w_vvvv_l_pp: u8,
-}
+/// Emit VEX prefix for reg-reg AVX2 256-bit instructions.
+/// Uses 2-byte form (C5) when possible, falls back to 3-byte (C4).
+/// `map`: 1 = 0F, 2 = 0F38, 3 = 0F3A.
+/// `pp`: 0 = none, 1 = 66, 2 = F3, 3 = F2.
+/// `w`: REX.W bit (0 or 1).
+fn vex_rr(buf: &mut [u8; 4], map: u8, pp: u8, w: u8, vvvv: u8, reg: u8, rm: u8) -> usize {
+    let r_inv = if reg < 8 { 0x80u8 } else { 0x00u8 };
+    let b_inv = if rm < 8 { 0x20u8 } else { 0x00u8 };
+    let vvvv_inv = ((!vvvv) & 0xF) << 3;
 
-impl VexPrefix {
-    const fn avx2_256_0f(vvvv: u8) -> Self {
-        Self {
-            rxb: 0b11100001,  // R=1, X=1, B=1 (inverted = 0,0,0), map=0F
-            map: 0x01,
-            w_vvvv_l_pp: 0b00000100 | (((!vvvv) & 0xF) << 3), // W=0, L=1 (256-bit), pp=00
-        }
-    }
-
-    const fn avx2_256_0f38(vvvv: u8) -> Self {
-        Self {
-            rxb: 0b11100010,  // map=0F38
-            map: 0x02,
-            w_vvvv_l_pp: 0b00000100 | (((!vvvv) & 0xF) << 3),
-        }
-    }
-
-    fn encode_3byte(&self, dst_reg: u8) -> [u8; 3] {
-        let r = if dst_reg >= 8 { 0 } else { 0x80 };
-        [
-            0xC4,
-            self.rxb | r,
-            self.w_vvvv_l_pp,
-        ]
+    // 2-byte VEX: only when map=0F, W=0, X=1, B=1 (rm < 8)
+    if map == 1 && w == 0 && rm < 8 {
+        buf[0] = 0xC5;
+        buf[1] = r_inv | vvvv_inv | 0x04 | pp; // L=1 (bit 2), pp in bits 0-1
+        2
+    } else {
+        buf[0] = 0xC4;
+        buf[1] = r_inv | 0x40 | b_inv | map; // X̃=1 (bit 6), R̃, B̃, mmmmm
+        buf[2] = (w << 7) | vvvv_inv | 0x04 | pp; // W, ~vvvv, L=1, pp
+        3
     }
 }
 
@@ -125,6 +113,14 @@ impl X86_64Encoder {
         &self.buf[..self.pos]
     }
 
+    /// Emit a VEX-encoded reg-reg instruction: VEX prefix + opcode + ModRM.
+    fn emit_vex_rr(&mut self, map: u8, pp: u8, w: u8, opcode: u8, dst: u8, src1: u8, src2: u8) -> Result<(), LoweringError> {
+        let mut vex = [0u8; 4];
+        let vex_len = vex_rr(&mut vex, map, pp, w, src1, dst, src2);
+        self.emit(&vex[..vex_len])?;
+        self.emit(&[opcode, modrm(0b11, dst & 7, src2 & 7)])
+    }
+
     fn emit(&mut self, bytes: &[u8]) -> Result<(), LoweringError> {
         if self.pos + bytes.len() > 16384 {
             return Err(LoweringError::ICacheBudgetExceeded {
@@ -138,133 +134,98 @@ impl X86_64Encoder {
         Ok(())
     }
 
-    /// VMOVDQU ymm, [rdi + offset]
+    /// VMOVDQU ymm, [rdi + offset] — VEX.256.F3.0F 6F /r
     pub fn emit_vmovdqu_load(&mut self, dst: VReg, offset: u32) -> Result<usize, LoweringError> {
         let start = self.pos;
         let dst_reg = ymm(dst);
-        
+        let r_inv = if dst_reg < 8 { 0x80u8 } else { 0x00u8 };
         if dst_reg < 8 {
-            self.emit(&[0xC5, 0xFE, 0x6F])?;
+            // 2-byte VEX: C5 [R̃ vvvv=1111 L=1 pp=10(F3)]
+            self.emit(&[0xC5, r_inv | 0x7E, 0x6F])?;
         } else {
-            self.emit(&[0xC4, 0xC1, 0x7E, 0x6F])?;
+            // 3-byte VEX: packet_base < 8 so B̃=1
+            self.emit(&[0xC4, r_inv | 0x61, 0x7E, 0x6F])?;
         }
-        
         self.emit(&[modrm(0b10, dst_reg & 7, self.packet_base)])?;
         self.emit(&offset.to_le_bytes())?;
-        
         Ok(self.pos - start)
     }
 
-    /// VPMASKMOVQ — fault-safe masked load. Masked lanes won't fault.
+    /// VPMASKMOVQ — fault-safe masked load. VEX.256.66.0F38 8C /r
     pub fn emit_vpmaskmovq_load(&mut self, dst: VReg, mask: VReg, offset: u32) -> Result<usize, LoweringError> {
         let start = self.pos;
         let dst_reg = ymm(dst);
         let mask_reg = ymm(mask);
-        
-        let vex2 = 0xE2;
-        let vex3 = 0x80 | (((!mask_reg) & 0xF) << 3) | 0x05;
-        
-        self.emit(&[0xC4, vex2, vex3, 0x8C])?;
+        let r_inv = if dst_reg < 8 { 0x80u8 } else { 0x00u8 };
+        let vvvv_inv = ((!mask_reg) & 0xF) << 3;
+        // 3-byte VEX: C4 [R̃Xb̃ mmmmm] [W vvvv L pp]
+        // map=2 (0F38), X̃=1, B̃=1 (packet_base < 8), W=0, L=1, pp=01
+        self.emit(&[0xC4, r_inv | 0x62, vvvv_inv | 0x05, 0x8C])?;
         self.emit(&[modrm(0b10, dst_reg & 7, self.packet_base)])?;
         self.emit(&offset.to_le_bytes())?;
-        
         Ok(self.pos - start)
     }
 
-    /// VPCMPGTQ ymm, ymm, ymm
+    /// VPCMPGTQ ymm, ymm, ymm — VEX.256.66.0F38 37 /r
     pub fn emit_vpcmpgtq(&mut self, dst: VReg, src1: VReg, src2: VReg) -> Result<usize, LoweringError> {
         let start = self.pos;
-        
-        let vex2 = 0xE2;
-        let vex3 = 0x80 | (((!ymm(src1)) & 0xF) << 3) | 0x05;
-        
-        self.emit(&[0xC4, vex2, vex3, 0x37])?;
-        self.emit(&[modrm(0b11, ymm(dst) & 7, ymm(src2) & 7)])?;
-        
+        self.emit_vex_rr(2, 1, 0, 0x37, ymm(dst), ymm(src1), ymm(src2))?;
         Ok(self.pos - start)
     }
 
-    /// VPCMPEQQ ymm, ymm, ymm
+    /// VPCMPEQQ ymm, ymm, ymm — VEX.256.66.0F38 29 /r
     pub fn emit_vpcmpeqq(&mut self, dst: VReg, src1: VReg, src2: VReg) -> Result<usize, LoweringError> {
         let start = self.pos;
-        
-        let vex2 = 0xE2;
-        let vex3 = (((!ymm(src1)) & 0xF) << 3) | 0x05; // W=0, L=1, pp=01
-        
-        self.emit(&[0xC4, vex2, vex3, 0x29])?;
-        self.emit(&[modrm(0b11, ymm(dst) & 7, ymm(src2) & 7)])?;
-        
+        self.emit_vex_rr(2, 1, 0, 0x29, ymm(dst), ymm(src1), ymm(src2))?;
         Ok(self.pos - start)
     }
 
-    /// VPANDN ymm, ymm, ymm — dst = ~src1 & src2
+    /// VPANDN ymm, ymm, ymm — dst = ~src1 & src2, VEX.256.66.0F DF /r
     pub fn emit_vpandn(&mut self, dst: VReg, src1: VReg, src2: VReg) -> Result<usize, LoweringError> {
         let start = self.pos;
-        let vvvv = (!ymm(src1)) & 0xF;
-        self.emit(&[0xC5, (vvvv << 3) | 0x05, 0xDF])?;
-        self.emit(&[modrm(0b11, ymm(dst) & 7, ymm(src2) & 7)])?;
+        self.emit_vex_rr(1, 1, 0, 0xDF, ymm(dst), ymm(src1), ymm(src2))?;
         Ok(self.pos - start)
     }
 
-    /// VPCMPEQD ymm, ymm, ymm — with same operand produces all-ones
+    /// VPCMPEQD ymm, ymm, ymm — VEX.256.66.0F 76 /r
     pub fn emit_vpcmpeqd(&mut self, dst: VReg, src1: VReg, src2: VReg) -> Result<usize, LoweringError> {
         let start = self.pos;
-        let vvvv = (!ymm(src1)) & 0xF;
-        self.emit(&[0xC5, (vvvv << 3) | 0x05, 0x76])?;
-        self.emit(&[modrm(0b11, ymm(dst) & 7, ymm(src2) & 7)])?;
+        self.emit_vex_rr(1, 1, 0, 0x76, ymm(dst), ymm(src1), ymm(src2))?;
         Ok(self.pos - start)
     }
 
-    /// VPAND ymm, ymm, ymm
+    /// VPAND ymm, ymm, ymm — VEX.256.66.0F DB /r
     pub fn emit_vpand(&mut self, dst: VReg, src1: VReg, src2: VReg) -> Result<usize, LoweringError> {
         let start = self.pos;
-        let vvvv = (!ymm(src1)) & 0xF;
-        self.emit(&[0xC5, (vvvv << 3) | 0x05, 0xDB])?;
-        self.emit(&[modrm(0b11, ymm(dst) & 7, ymm(src2) & 7)])?;
+        self.emit_vex_rr(1, 1, 0, 0xDB, ymm(dst), ymm(src1), ymm(src2))?;
         Ok(self.pos - start)
     }
 
-    /// VPOR ymm, ymm, ymm
+    /// VPOR ymm, ymm, ymm — VEX.256.66.0F EB /r
     pub fn emit_vpor(&mut self, dst: VReg, src1: VReg, src2: VReg) -> Result<usize, LoweringError> {
         let start = self.pos;
-        
-        let vvvv = (!ymm(src1)) & 0xF;
-        self.emit(&[0xC5, (vvvv << 3) | 0x05, 0xEB])?;
-        self.emit(&[modrm(0b11, ymm(dst) & 7, ymm(src2) & 7)])?;
-        
+        self.emit_vex_rr(1, 1, 0, 0xEB, ymm(dst), ymm(src1), ymm(src2))?;
         Ok(self.pos - start)
     }
 
-    /// VPXOR ymm, ymm, ymm
+    /// VPXOR ymm, ymm, ymm — VEX.256.66.0F EF /r
     pub fn emit_vpxor(&mut self, dst: VReg, src1: VReg, src2: VReg) -> Result<usize, LoweringError> {
         let start = self.pos;
-        
-        let vvvv = (!ymm(src1)) & 0xF;
-        self.emit(&[0xC5, (vvvv << 3) | 0x05, 0xEF])?;
-        self.emit(&[modrm(0b11, ymm(dst) & 7, ymm(src2) & 7)])?;
-        
+        self.emit_vex_rr(1, 1, 0, 0xEF, ymm(dst), ymm(src1), ymm(src2))?;
         Ok(self.pos - start)
     }
 
-    /// VPADDQ ymm, ymm, ymm
+    /// VPADDQ ymm, ymm, ymm — VEX.256.66.0F D4 /r
     pub fn emit_vpaddq(&mut self, dst: VReg, src1: VReg, src2: VReg) -> Result<usize, LoweringError> {
         let start = self.pos;
-        
-        let vvvv = (!ymm(src1)) & 0xF;
-        self.emit(&[0xC5, (vvvv << 3) | 0x05, 0xD4])?;
-        self.emit(&[modrm(0b11, ymm(dst) & 7, ymm(src2) & 7)])?;
-        
+        self.emit_vex_rr(1, 1, 0, 0xD4, ymm(dst), ymm(src1), ymm(src2))?;
         Ok(self.pos - start)
     }
 
-    /// VPSUBQ ymm, ymm, ymm
+    /// VPSUBQ ymm, ymm, ymm — VEX.256.66.0F FB /r
     pub fn emit_vpsubq(&mut self, dst: VReg, src1: VReg, src2: VReg) -> Result<usize, LoweringError> {
         let start = self.pos;
-        
-        let vvvv = (!ymm(src1)) & 0xF;
-        self.emit(&[0xC5, (vvvv << 3) | 0x05, 0xFB])?;
-        self.emit(&[modrm(0b11, ymm(dst) & 7, ymm(src2) & 7)])?;
-        
+        self.emit_vex_rr(1, 1, 0, 0xFB, ymm(dst), ymm(src1), ymm(src2))?;
         Ok(self.pos - start)
     }
 
@@ -286,54 +247,69 @@ impl X86_64Encoder {
     /// VPBROADCASTQ ymm, imm64 — via RAX scratch
     pub fn emit_vpbroadcastq_imm(&mut self, dst: VReg, value: u64) -> Result<usize, LoweringError> {
         let start = self.pos;
+        let d = ymm(dst);
+        let r_inv = if d < 8 { 0x80u8 } else { 0x00u8 };
         
+        // MOV RAX, imm64
         self.emit(&[0x48, 0xB8])?;
         self.emit(&value.to_le_bytes())?;
-        self.emit(&[0xC4, 0xE1, 0xF9, 0x6E, modrm(0b11, ymm(dst) & 7, 0)])?;
-        self.emit(&[0xC4, 0xE2, 0x7D, 0x59, modrm(0b11, ymm(dst) & 7, ymm(dst) & 7)])?;
+        // VMOVQ xmm(dst), RAX — VEX.128.66.0F.W1 6E /r (rm=RAX=0)
+        self.emit(&[0xC4, r_inv | 0x61, 0xF9, 0x6E, modrm(0b11, d & 7, 0)])?;
+        // VPBROADCASTQ ymm(dst), xmm(dst) — VEX.256.66.0F38 59 /r
+        self.emit(&[0xC4, r_inv | 0x62, 0x7D, 0x59, modrm(0b11, d & 7, d & 7)])?;
         
         Ok(self.pos - start)
     }
 
-    /// VBLENDVPD ymm, ymm, ymm, ymm
+    /// VBLENDVPD ymm, ymm, ymm, ymm — VEX.256.66.0F3A 4B /r /is4
     pub fn emit_vblendvpd(&mut self, dst: VReg, src1: VReg, src2: VReg, mask: VReg) -> Result<usize, LoweringError> {
         let start = self.pos;
-        
-        let vex2 = 0xE3;
-        let vex3 = (((!ymm(src1)) & 0xF) << 3) | 0x05;
-        
-        self.emit(&[0xC4, vex2, vex3, 0x4B])?;
-        self.emit(&[modrm(0b11, ymm(dst) & 7, ymm(src2) & 7)])?;
+        let d = ymm(dst);
+        let s2 = ymm(src2);
+        let r_inv = if d < 8 { 0x80u8 } else { 0x00u8 };
+        let b_inv = if s2 < 8 { 0x20u8 } else { 0x00u8 };
+        let vvvv_inv = ((!ymm(src1)) & 0xF) << 3;
+        // 3-byte VEX: map=3 (0F3A), X̃=1, W=0, L=1, pp=01
+        self.emit(&[0xC4, r_inv | 0x43 | b_inv, vvvv_inv | 0x05, 0x4B])?;
+        self.emit(&[modrm(0b11, d & 7, s2 & 7)])?;
         self.emit(&[(ymm(mask) << 4)])?;
-        
         Ok(self.pos - start)
     }
 
-    /// VMOVNTDQ — NT store, bypasses cache. Requires 32-byte alignment.
+    /// VMOVNTDQ [rdx + offset], ymm — VEX.256.66.0F E7 /r
     pub fn emit_vmovntdq_store(&mut self, src: VReg, offset: u32) -> Result<usize, LoweringError> {
         let start = self.pos;
-        self.emit(&[0xC5, 0xFD, 0xE7])?;
-        self.emit(&[modrm(0b10, ymm(src) & 7, self.output_base)])?;
+        let src_reg = ymm(src);
+        let r_inv = if src_reg < 8 { 0x80u8 } else { 0x00u8 };
+        if src_reg < 8 {
+            self.emit(&[0xC5, r_inv | 0x7D, 0xE7])?;
+        } else {
+            self.emit(&[0xC4, r_inv | 0x61, 0x7D, 0xE7])?;
+        }
+        self.emit(&[modrm(0b10, src_reg & 7, self.output_base)])?;
         self.emit(&offset.to_le_bytes())?;
         Ok(self.pos - start)
     }
 
-    /// VMOVDQU store
+    /// VMOVDQU [rdx + offset], ymm — VEX.256.F3.0F 7F /r
     pub fn emit_vmovdqu_store(&mut self, src: VReg, offset: u32) -> Result<usize, LoweringError> {
         let start = self.pos;
-        self.emit(&[0xC5, 0xFE, 0x7F])?;
-        self.emit(&[modrm(0b10, ymm(src) & 7, self.output_base)])?;
+        let src_reg = ymm(src);
+        let r_inv = if src_reg < 8 { 0x80u8 } else { 0x00u8 };
+        if src_reg < 8 {
+            self.emit(&[0xC5, r_inv | 0x7E, 0x7F])?;
+        } else {
+            self.emit(&[0xC4, r_inv | 0x61, 0x7E, 0x7F])?;
+        }
+        self.emit(&[modrm(0b10, src_reg & 7, self.output_base)])?;
         self.emit(&offset.to_le_bytes())?;
         Ok(self.pos - start)
     }
 
-    /// VPSHUFB ymm, ymm, ymm — byte shuffle within 128-bit lanes
+    /// VPSHUFB ymm, ymm, ymm — VEX.256.66.0F38 00 /r
     pub fn emit_vpshufb(&mut self, dst: VReg, src: VReg, mask: VReg) -> Result<usize, LoweringError> {
         let start = self.pos;
-        let vvvv = (!ymm(src)) & 0xF;
-        // VEX.256.66.0F38 00 /r
-        self.emit(&[0xC4, 0xE2, (vvvv << 3) | 0x05, 0x00])?;
-        self.emit(&[modrm(0b11, ymm(dst) & 7, ymm(mask) & 7)])?;
+        self.emit_vex_rr(2, 1, 0, 0x00, ymm(dst), ymm(src), ymm(mask))?;
         Ok(self.pos - start)
     }
 
@@ -350,37 +326,37 @@ impl X86_64Encoder {
             _ => return Ok(0), // U8 byte-swap is identity
         };
 
-        // MOV RAX, lo; VMOVQ xmm15, rax
+        let s = ymm(scratch);
+        let r_inv = if s < 8 { 0x80u8 } else { 0x00u8 };
+        let b_inv = if s < 8 { 0x20u8 } else { 0x00u8 }; // rm field extension
+        let vvvv_inv = ((!s) & 0xF) << 3;
+
+        // MOV RAX, lo; VMOVQ xmm(scratch), rax — VEX.128.66.0F.W1 6E /r
         self.emit(&[0x48, 0xB8])?;
         self.emit(&lo.to_le_bytes())?;
-        self.emit(&[0xC4, 0xE1, 0xF9, 0x6E, modrm(0b11, ymm(scratch) & 7, 0)])?;
+        self.emit(&[0xC4, r_inv | 0x61, 0xF9, 0x6E, modrm(0b11, s & 7, 0)])?;
 
-        // MOV RAX, hi; VPINSRQ xmm15, xmm15, rax, 1
+        // MOV RAX, hi; VPINSRQ xmm(scratch), xmm(scratch), rax, 1 — VEX.128.66.0F3A.W1 22 /r ib
         self.emit(&[0x48, 0xB8])?;
         self.emit(&hi.to_le_bytes())?;
-        // VEX.128.66.0F3A 22 /r ib
-        let vvvv_ins = (!ymm(scratch)) & 0xF;
-        self.emit(&[0xC4, 0xE3, (vvvv_ins << 3) | 0x01, 0x22])?;
-        self.emit(&[modrm(0b11, ymm(scratch) & 7, 0)])?; // xmm15, rax
-        self.emit(&[0x01])?; // imm8 = 1 (insert into qword 1)
+        self.emit(&[0xC4, r_inv | 0x63, vvvv_inv | 0xF9, 0x22])?;
+        self.emit(&[modrm(0b11, s & 7, 0)])?;
+        self.emit(&[0x01])?;
 
-        // VINSERTI128 ymm15, ymm15, xmm15, 1 — replicate low 128 to high 128
-        let vvvv_vi = (!ymm(scratch)) & 0xF;
-        self.emit(&[0xC4, 0xE3, (vvvv_vi << 3) | 0x05, 0x38])?;
-        self.emit(&[modrm(0b11, ymm(scratch) & 7, ymm(scratch) & 7)])?;
-        self.emit(&[0x01])?; // imm8 = 1
+        // VINSERTI128 ymm(scratch), ymm(scratch), xmm(scratch), 1 — VEX.256.66.0F3A 38 /r ib
+        self.emit(&[0xC4, r_inv | 0x43 | b_inv, vvvv_inv | 0x05, 0x38])?;
+        self.emit(&[modrm(0b11, s & 7, s & 7)])?;
+        self.emit(&[0x01])?;
 
         self.emit_vpshufb(dst, src, scratch)?;
         Ok(self.pos - start)
     }
 
-    /// VPTEST ymm, ymm
+    /// VPTEST ymm, ymm — VEX.256.66.0F38 17 /r
     pub fn emit_vptest(&mut self, src1: VReg, src2: VReg) -> Result<usize, LoweringError> {
         let start = self.pos;
-        
-        self.emit(&[0xC4, 0xE2, 0x7D, 0x17])?;
-        self.emit(&[modrm(0b11, ymm(src1) & 7, ymm(src2) & 7)])?;
-        
+        // VPTEST has no vvvv operand; vvvv must be 1111
+        self.emit_vex_rr(2, 1, 0, 0x17, ymm(src1), 0x0F, ymm(src2))?;
         Ok(self.pos - start)
     }
 
