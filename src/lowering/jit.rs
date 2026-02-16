@@ -781,7 +781,7 @@ impl LoweringEngine {
         code.write(&[0x0F, 0x18, 0x47, 0x40])?;   // PREFETCHT0 [rdi+64]
         code.write(&[0x55])?;                     // push rbp
         code.write(&[0x48, 0x89, 0xE5])?;         // mov rbp, rsp
-        code.write(&[0x48, 0x83, 0xEC, 0x80])?;   // sub rsp, 128
+        code.write(&[0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00])?; // sub rsp, 128
         code.write(&[0x41, 0x54])?;               // push r12
         code.write(&[0x49, 0x89, 0xD4])?;         // mov r12, rdx
         Ok(())
