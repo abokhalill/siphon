@@ -198,6 +198,11 @@ impl ExecutableBuffer {
     }
 }
 
+// SAFETY: ExecutableBuffer exclusively owns its mmap'd region. After make_executable(),
+// the memory is PROT_READ|PROT_EXEC (immutable). No aliased writes are possible.
+unsafe impl Send for ExecutableBuffer {}
+unsafe impl Sync for ExecutableBuffer {}
+
 impl Drop for ExecutableBuffer {
     #[cfg(unix)]
     fn drop(&mut self) {
