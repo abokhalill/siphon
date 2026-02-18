@@ -712,10 +712,22 @@ impl RegAlloc {
 
     /// Return a register to the free pool for reuse.
     pub fn free(&mut self, reg: VReg) {
-        if (self.free_count as usize) < self.free_list.len() {
-            self.free_list[self.free_count as usize] = reg.0;
-            self.free_count += 1;
-        }
+        debug_assert!(
+            reg.0 < self.max_vreg,
+            "free() called with out-of-range VReg({}), max={}",
+            reg.0, self.max_vreg
+        );
+        debug_assert!(
+            !self.free_list[..self.free_count as usize].contains(&reg.0),
+            "double-free of VReg({})",
+            reg.0
+        );
+        assert!(
+            (self.free_count as usize) < self.free_list.len(),
+            "free list overflow"
+        );
+        self.free_list[self.free_count as usize] = reg.0;
+        self.free_count += 1;
     }
 
     /// Bind a RIF node to a register. Fails if node index exceeds MAX_RIF_NODES.

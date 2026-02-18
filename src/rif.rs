@@ -380,9 +380,14 @@ impl<'a> RifGraph<'a> {
                     }
                 }
                 RifNode::Const { .. } => {}
-                RifNode::Validate { value_node, .. } => {
+                RifNode::Validate { value_node, constraint } => {
                     if value_node.0 >= current_idx {
                         return Err("INV-NODE-001: forward reference in Validate");
+                    }
+                    if let Constraint::Range { lo, hi } = constraint {
+                        if lo > hi {
+                            return Err("INV-NODE-003: Range constraint lo > hi");
+                        }
                     }
                 }
                 RifNode::Guard { parent_mask, condition } => {
