@@ -144,6 +144,7 @@ impl ExecutableBuffer {
     }
 
     pub fn write(&mut self, bytes: &[u8]) -> Result<(), LoweringError> {
+        assert!(!self.executable, "write() called on executable buffer (W^X violation)");
         if self.len + bytes.len() > self.capacity {
             return Err(LoweringError::ICacheBudgetExceeded {
                 current: self.len,
@@ -251,7 +252,7 @@ impl LoweringEngine {
             )?;
         }
 
-        mem_verifier.verify_all().map_err(|_| LoweringError::WitnessGenerationFailed)?;
+        mem_verifier.verify_all()?;
 
         let final_mask = self.find_final_mask(ops.as_slice());
 
@@ -300,7 +301,7 @@ impl LoweringEngine {
             self.lower_node(node, node_idx, &mut ops, &mut regalloc, &mut witness_gen, &mut mem_verifier)?;
         }
 
-        mem_verifier.verify_all().map_err(|_| LoweringError::WitnessGenerationFailed)?;
+        mem_verifier.verify_all()?;
 
         let min_packet_len = self.compute_min_packet_len(graph)?;
 
@@ -394,9 +395,9 @@ impl LoweringEngine {
             length: access.length,
             mask: witness.current_mask(),
             is_load: true,
-        }).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+        })?;
 
-        witness.record(node_idx, rif_node_ref, &op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+        witness.record(node_idx, rif_node_ref, &op)?;
         ops.push(op)?;
         regalloc.bind_typed(node_idx, dst, scalar_type)?;
         Ok(())
@@ -429,9 +430,9 @@ impl LoweringEngine {
             length: access.length,
             mask: witness.current_mask(),
             is_load: false,
-        }).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+        })?;
 
-        witness.record(node_idx, rif_node_ref, &op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+        witness.record(node_idx, rif_node_ref, &op)?;
         ops.push(op)?;
         Ok(())
     }
@@ -465,7 +466,7 @@ impl LoweringEngine {
                     imm_or_reg: rhs_reg,
                     scalar_type: result_type,
                 };
-                witness.record(node_idx, rif_node_ref, &microop).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+                witness.record(node_idx, rif_node_ref, &microop)?;
                 ops.push(microop)?;
                 regalloc.bind(node_idx, dst)?;
                 return Ok(());
@@ -477,7 +478,7 @@ impl LoweringEngine {
                     comparand: rhs_reg,
                     scalar_type: result_type,
                 };
-                witness.record(node_idx, rif_node_ref, &microop).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+                witness.record(node_idx, rif_node_ref, &microop)?;
                 ops.push(microop)?;
                 regalloc.bind(node_idx, dst)?;
                 return Ok(());
@@ -489,7 +490,7 @@ impl LoweringEngine {
                     comparand: rhs_reg,
                     scalar_type: result_type,
                 };
-                witness.record(node_idx, rif_node_ref, &microop).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+                witness.record(node_idx, rif_node_ref, &microop)?;
                 ops.push(microop)?;
                 regalloc.bind(node_idx, dst)?;
                 return Ok(());
@@ -497,7 +498,7 @@ impl LoweringEngine {
             _ => return Err(LoweringError::UnsupportedNode),
         };
 
-        witness.record(node_idx, rif_node_ref, &microop).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+        witness.record(node_idx, rif_node_ref, &microop)?;
         ops.push(microop)?;
         regalloc.bind(node_idx, dst)?;
         Ok(())
@@ -526,7 +527,7 @@ impl LoweringEngine {
                     value: u64::MAX,
                     scalar_type: result_type,
                 };
-                witness.record(node_idx, rif_node_ref, &broadcast).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+                witness.record(node_idx, rif_node_ref, &broadcast)?;
                 ops.push(broadcast)?;
                 let xor_op = MicroOp::Xor { dst, src1: src, src2: ones };
                 regalloc.free(ones);
@@ -539,7 +540,7 @@ impl LoweringEngine {
                     value: 0,
                     scalar_type: result_type,
                 };
-                witness.record(node_idx, rif_node_ref, &broadcast).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+                witness.record(node_idx, rif_node_ref, &broadcast)?;
                 ops.push(broadcast)?;
                 let sub_op = MicroOp::Sub { dst, src1: zero, src2: src, scalar_type: result_type };
                 regalloc.free(zero);
@@ -547,7 +548,7 @@ impl LoweringEngine {
             }
         };
 
-        witness.record(node_idx, rif_node_ref, &microop).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+        witness.record(node_idx, rif_node_ref, &microop)?;
         ops.push(microop)?;
         regalloc.bind(node_idx, dst)?;
         Ok(())
@@ -573,7 +574,7 @@ impl LoweringEngine {
             scalar_type,
         };
 
-        witness.record(node_idx, rif_node_ref, &op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+        witness.record(node_idx, rif_node_ref, &op)?;
         ops.push(op)?;
         regalloc.bind(node_idx, dst)?;
         Ok(())
@@ -599,7 +600,7 @@ impl LoweringEngine {
                     value: u64::MAX,
                     scalar_type: ScalarType::U64,
                 };
-                witness.record(node_idx, rif_node_ref, &op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+                witness.record(node_idx, rif_node_ref, &op)?;
                 ops.push(op)?;
                 witness.set_mask_reg(dst_mask, witness.current_mask());
             }
@@ -609,7 +610,7 @@ impl LoweringEngine {
                     src,
                     scalar_type: ScalarType::U64,
                 };
-                witness.record(node_idx, rif_node_ref, &op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+                witness.record(node_idx, rif_node_ref, &op)?;
                 ops.push(op)?;
                 witness.set_mask_reg(dst_mask, witness.current_mask());
             }
@@ -620,7 +621,7 @@ impl LoweringEngine {
                     value: *lo,
                     scalar_type: ScalarType::U64,
                 };
-                witness.record(node_idx, rif_node_ref, &lo_op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+                witness.record(node_idx, rif_node_ref, &lo_op)?;
                 ops.push(lo_op)?;
 
                 let hi_reg = regalloc.alloc()?;
@@ -629,7 +630,7 @@ impl LoweringEngine {
                     value: *hi,
                     scalar_type: ScalarType::U64,
                 };
-                witness.record(node_idx, rif_node_ref, &hi_op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+                witness.record(node_idx, rif_node_ref, &hi_op)?;
                 ops.push(hi_op)?;
 
                 let ge_mask = regalloc.alloc()?;
@@ -639,7 +640,7 @@ impl LoweringEngine {
                     comparand: lo_reg,
                     scalar_type: ScalarType::U64,
                 };
-                witness.record(node_idx, rif_node_ref, &ge_op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+                witness.record(node_idx, rif_node_ref, &ge_op)?;
                 ops.push(ge_op)?;
                 regalloc.free(lo_reg);
 
@@ -650,7 +651,7 @@ impl LoweringEngine {
                     comparand: hi_reg,
                     scalar_type: ScalarType::U64,
                 };
-                witness.record(node_idx, rif_node_ref, &le_op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+                witness.record(node_idx, rif_node_ref, &le_op)?;
                 ops.push(le_op)?;
                 regalloc.free(hi_reg);
 
@@ -662,7 +663,7 @@ impl LoweringEngine {
                     src1: ge_mask,
                     src2: le_mask,
                 };
-                witness.record(node_idx, rif_node_ref, &and_op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+                witness.record(node_idx, rif_node_ref, &and_op)?;
                 ops.push(and_op)?;
                 regalloc.free(ge_mask);
                 regalloc.free(le_mask);
@@ -698,7 +699,7 @@ impl LoweringEngine {
                 src2: cond_reg,
             };
             
-            witness.record(node_idx, rif_node_ref, &op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+            witness.record(node_idx, rif_node_ref, &op)?;
             ops.push(op)?;
         } else {
             let op = MicroOp::MaskAnd {
@@ -706,7 +707,7 @@ impl LoweringEngine {
                 src1: cond_reg,
                 src2: cond_reg,
             };
-            witness.record(node_idx, rif_node_ref, &op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+            witness.record(node_idx, rif_node_ref, &op)?;
             ops.push(op)?;
         }
 
@@ -742,7 +743,7 @@ impl LoweringEngine {
             scalar_type: result_type,
         };
 
-        witness.record(node_idx, rif_node_ref, &op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+        witness.record(node_idx, rif_node_ref, &op)?;
         ops.push(op)?;
         regalloc.bind(node_idx, dst)?;
         Ok(())
@@ -773,7 +774,7 @@ impl LoweringEngine {
             mask: mask_reg,
         };
 
-        witness.record(node_idx, rif_node_ref, &op).map_err(|_| LoweringError::WitnessGenerationFailed)?;
+        witness.record(node_idx, rif_node_ref, &op)?;
         ops.push(op)?;
         Ok(())
     }

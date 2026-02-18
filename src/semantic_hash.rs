@@ -63,7 +63,7 @@ impl ManifestEntry {
 }
 
 /// Extract memory access manifest from RIF graph. Deterministic order.
-pub fn extract_manifest<'a>(graph: &RifGraph<'a>) -> ManifestBuilder {
+pub fn extract_manifest<'a>(graph: &RifGraph<'a>) -> Result<ManifestBuilder, &'static str> {
     let mut builder = ManifestBuilder::new();
 
     for (idx, node) in graph.nodes.iter().enumerate() {
@@ -76,7 +76,7 @@ pub fn extract_manifest<'a>(graph: &RifGraph<'a>) -> ManifestBuilder {
                     length: access.length,
                     mask: access.mask_node_idx,
                     node_idx,
-                });
+                })?;
             }
             RifNode::Store { access, .. } => {
                 builder.push(ManifestEntry {
@@ -85,13 +85,13 @@ pub fn extract_manifest<'a>(graph: &RifGraph<'a>) -> ManifestBuilder {
                     length: access.length,
                     mask: access.mask_node_idx,
                     node_idx,
-                });
+                })?;
             }
             _ => {}
         }
     }
 
-    builder
+    Ok(builder)
 }
 
 /// Fixed-capacity manifest (256 max). If you need more, your protocol is too complex.
@@ -114,11 +114,13 @@ impl ManifestBuilder {
         }
     }
 
-    pub fn push(&mut self, entry: ManifestEntry) {
-        if self.count < 256 {
-            self.entries[self.count] = entry;
-            self.count += 1;
+    pub fn push(&mut self, entry: ManifestEntry) -> Result<(), &'static str> {
+        if self.count >= 256 {
+            return Err("manifest capacity exceeded (256)");
         }
+        self.entries[self.count] = entry;
+        self.count += 1;
+        Ok(())
     }
 
     pub fn as_slice(&self) -> &[ManifestEntry] {
@@ -161,7 +163,7 @@ impl GuardChainEntry {
 }
 
 /// Extract guard chain for monotonicity hashing.
-pub fn extract_guard_chain<'a>(graph: &RifGraph<'a>) -> GuardChainBuilder {
+pub fn extract_guard_chain<'a>(graph: &RifGraph<'a>) -> Result<GuardChainBuilder, &'static str> {
     let mut builder = GuardChainBuilder::new();
 
     for (idx, node) in graph.nodes.iter().enumerate() {
@@ -170,11 +172,11 @@ pub fn extract_guard_chain<'a>(graph: &RifGraph<'a>) -> GuardChainBuilder {
                 node_idx: NodeIndex(idx as u32),
                 parent: *parent_mask,
                 condition: *condition,
-            });
+            })?;
         }
     }
 
-    builder
+    Ok(builder)
 }
 
 /// Fixed-capacity guard chain (64 max).
@@ -195,11 +197,13 @@ impl GuardChainBuilder {
         }
     }
 
-    pub fn push(&mut self, entry: GuardChainEntry) {
-        if self.count < 64 {
-            self.entries[self.count] = entry;
-            self.count += 1;
+    pub fn push(&mut self, entry: GuardChainEntry) -> Result<(), &'static str> {
+        if self.count >= 64 {
+            return Err("guard chain capacity exceeded (64)");
         }
+        self.entries[self.count] = entry;
+        self.count += 1;
+        Ok(())
     }
 
     pub fn as_slice(&self) -> &[GuardChainEntry] {
@@ -253,13 +257,13 @@ pub fn compute_semantic_hash<'a>(graph: &RifGraph<'a>) -> Result<SemanticHash, &
         hasher.update(canonicalize_node(node).as_bytes());
     }
 
-    let manifest = extract_manifest(graph);
+    let manifest = extract_manifest(graph)?;
     hasher.update(&(manifest.len() as u32).to_be_bytes());
     for entry in manifest.as_slice() {
         hasher.update(&entry.to_bytes());
     }
 
-    let guards = extract_guard_chain(graph);
+    let guards = extract_guard_chain(graph)?;
     hasher.update(&(guards.as_slice().len() as u32).to_be_bytes());
     for entry in guards.as_slice() {
         hasher.update(&entry.to_bytes());

@@ -615,6 +615,16 @@ pub enum LoweringError {
     UnsupportedNode,
     InvalidMaskChain,
     WitnessGenerationFailed,
+    WitnessTagViolation {
+        microop_idx: u16,
+        rif_discriminant: u8,
+        microop_tag: u8,
+    },
+    WitnessMonotonicity {
+        microop_idx: u16,
+        mask_before: u16,
+        mask_after: u16,
+    },
     NodeLimitExceeded {
         node_idx: u32,
         limit: u32,
@@ -625,6 +635,27 @@ pub enum LoweringError {
     },
     OutputBufferOverflow,
     PacketBoundsOverflow,
+}
+
+impl From<crate::lowering::witness::MemorySafetyError> for LoweringError {
+    fn from(_e: crate::lowering::witness::MemorySafetyError) -> Self {
+        LoweringError::PacketBoundsOverflow
+    }
+}
+
+impl From<crate::lowering::witness::WitnessError> for LoweringError {
+    fn from(e: crate::lowering::witness::WitnessError) -> Self {
+        match e {
+            crate::lowering::witness::WitnessError::TooManyEntries => LoweringError::WitnessGenerationFailed,
+            crate::lowering::witness::WitnessError::MonotonicityViolation { microop_idx, mask_before, mask_after } => {
+                LoweringError::WitnessMonotonicity { microop_idx, mask_before: mask_before.0, mask_after: mask_after.0 }
+            }
+            crate::lowering::witness::WitnessError::InvalidMicroOpTag { microop_idx, rif_discriminant, microop_tag } => {
+                LoweringError::WitnessTagViolation { microop_idx, rif_discriminant, microop_tag }
+            }
+            crate::lowering::witness::WitnessError::HashMismatch => LoweringError::WitnessGenerationFailed,
+        }
+    }
 }
 
 pub const MAX_RIF_NODES: usize = 512;
