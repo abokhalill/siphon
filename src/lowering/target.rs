@@ -665,6 +665,7 @@ impl RegAlloc {
     }
 
     /// Allocate a register. Reclaimed registers are preferred over fresh ones.
+    #[must_use = "leaking a VReg exhausts the register pool; bind() or free() it"]
     pub fn alloc(&mut self) -> Result<VReg, LoweringError> {
         if self.free_count > 0 {
             self.free_count -= 1;

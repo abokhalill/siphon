@@ -305,7 +305,7 @@ impl RifNode {
             RifNode::Load { .. } => &[0],                    // LoadVector
             RifNode::Store { .. } => &[9],                   // Emit (store to output)
             RifNode::BinaryOp { .. } => &[1, 2, 3, 11, 12, 13, 14, 15], // ValidateCmp*, Add, Sub, And, Or, Xor
-            RifNode::UnaryOp { .. } => &[7, 16],             // MaskNot, ByteSwap
+            RifNode::UnaryOp { .. } => &[10, 12, 15, 16],     // BroadcastImm, Sub, Xor, ByteSwap
             RifNode::Const { .. } => &[10],                  // BroadcastImm
             RifNode::Validate { .. } => &[1, 2, 3, 4, 5, 10, 13], // ValidateCmp*, MaskAnd, BroadcastImm, And
             RifNode::Guard { .. } => &[5, 6, 7],             // MaskAnd, MaskOr, MaskNot

@@ -1,6 +1,6 @@
 //! Witness Generation 
 
-use crate::rif::NodeIndex;
+use crate::rif::{NodeIndex, RifNode};
 use crate::lowering::target::{LaneMask, MicroOp, VReg};
 use crate::semantic_hash::{Hasher, SemanticHash};
 
@@ -134,6 +134,11 @@ pub enum WitnessError {
         mask_before: LaneMask,
         mask_after: LaneMask,
     },
+    InvalidMicroOpTag {
+        microop_idx: u16,
+        rif_discriminant: u8,
+        microop_tag: u8,
+    },
     HashMismatch,
 }
 
@@ -164,11 +169,19 @@ impl WitnessGenerator {
     pub fn record(
         &mut self,
         rif_node: NodeIndex,
+        rif_node_ref: &RifNode,
         op: &MicroOp,
     ) -> Result<(), WitnessError> {
+        let tag = op.discriminant();
+        if !rif_node_ref.is_microop_tag_valid(tag) {
+            return Err(WitnessError::InvalidMicroOpTag {
+                microop_idx: self.microop_counter,
+                rif_discriminant: rif_node_ref.discriminant(),
+                microop_tag: tag,
+            });
+        }
+
         let mask_before = self.current_mask;
-        
-        // Compute mask_after based on the operation
         let mask_after = self.compute_mask_after(op, mask_before);
         
         let entry = WitnessEntry {
@@ -176,13 +189,12 @@ impl WitnessGenerator {
             microop_idx: self.microop_counter,
             mask_before,
             mask_after,
-            microop_tag: op.discriminant(),
+            microop_tag: tag,
         };
         
         self.witness.push(entry)?;
         self.microop_counter += 1;
         
-        // Update current mask if this op produces a mask
         if let Some(new_mask) = self.extract_produced_mask(op) {
             self.current_mask = new_mask;
         }
