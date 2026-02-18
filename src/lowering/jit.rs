@@ -70,6 +70,7 @@ pub struct BatchKernel {
 
 impl BatchKernel {
     pub fn as_fn(&self) -> BatchKernelFn {
+        assert!(self.code.executable, "as_fn() called on non-executable buffer");
         unsafe { std::mem::transmute(self.code.ptr) }
     }
 
