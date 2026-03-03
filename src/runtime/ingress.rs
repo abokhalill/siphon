@@ -162,11 +162,6 @@ impl VersionDispatcher {
         
         let version = *packet;
         
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            core::arch::x86_64::_mm_lfence();
-        }
-        
         match self.kernels[version as usize] {
             Some(kernel) => {
                 let result = kernel(packet, len, output);

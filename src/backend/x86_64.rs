@@ -360,7 +360,9 @@ impl X86_64Encoder {
         Ok(self.pos - start)
     }
 
-    /// LFENCE — Spectre mitigation
+    /// LFENCE — serializing instruction. Currently unused; retained for future use
+    /// if a coherent speculation threat model is defined.
+    #[allow(dead_code)]
     pub fn emit_lfence(&mut self) -> Result<usize, LoweringError> {
         let start = self.pos;
         self.emit(&[0x0F, 0xAE, 0xE8])?;
