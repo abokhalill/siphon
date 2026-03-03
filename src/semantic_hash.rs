@@ -211,25 +211,26 @@ impl GuardChainBuilder {
     }
 }
 
-/// BLAKE3 hasher. Minimal TCB implementation—use audited crate in prod.
+/// BLAKE3 hasher 
 pub struct Hasher {
-    state: Blake3State,
+    inner: blake3::Hasher,
 }
 
 impl Hasher {
     pub fn new() -> Self {
         Self {
-            state: Blake3State::new(),
+            inner: blake3::Hasher::new(),
         }
     }
 
     pub fn update(&mut self, data: &[u8]) {
-        self.state.update(data);
+        self.inner.update(data);
     }
 
     pub fn finalize(self) -> SemanticHash {
+        let hash = self.inner.finalize();
         SemanticHash {
-            bytes: self.state.finalize(),
+            bytes: *hash.as_bytes(),
         }
     }
 }
@@ -270,128 +271,6 @@ pub fn compute_semantic_hash<'a>(graph: &RifGraph<'a>) -> Result<SemanticHash, &
     }
 
     Ok(hasher.finalize())
-}
-
-/// BLAKE3 state. See https://github.com/BLAKE3-team/BLAKE3-specs
-struct Blake3State {
-    cv: [u32; 8],
-    buf: [u8; 64],
-    buf_len: usize,
-    total_len: u64,
-}
-
-const IV: [u32; 8] = [
-    0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
-    0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19,
-];
-
-const MSG_SCHEDULE: [[usize; 16]; 7] = [
-    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
-    [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8],
-    [3, 4, 10, 12, 13, 2, 7, 14, 6, 5, 9, 0, 11, 15, 8, 1],
-    [10, 7, 12, 9, 14, 3, 13, 15, 4, 0, 11, 2, 5, 8, 1, 6],
-    [12, 13, 9, 11, 15, 10, 14, 8, 7, 2, 5, 3, 0, 1, 6, 4],
-    [9, 14, 11, 5, 8, 12, 15, 1, 13, 3, 0, 10, 2, 6, 4, 7],
-    [11, 15, 5, 0, 1, 9, 8, 6, 14, 10, 2, 12, 3, 4, 7, 13],
-];
-
-impl Blake3State {
-    fn new() -> Self {
-        Self {
-            cv: IV,
-            buf: [0u8; 64],
-            buf_len: 0,
-            total_len: 0,
-        }
-    }
-
-    fn update(&mut self, mut data: &[u8]) {
-        while !data.is_empty() {
-            let space = 64 - self.buf_len;
-            let to_copy = data.len().min(space);
-
-            self.buf[self.buf_len..self.buf_len + to_copy].copy_from_slice(&data[..to_copy]);
-            self.buf_len += to_copy;
-            data = &data[to_copy..];
-
-            if self.buf_len == 64 {
-                self.compress_block(false);
-                self.buf_len = 0;
-            }
-        }
-    }
-
-    fn compress_block(&mut self, is_final: bool) {
-        let mut m = [0u32; 16];
-        for (i, chunk) in self.buf.chunks_exact(4).enumerate() {
-            m[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        }
-
-        let block_len = if is_final { self.buf_len as u32 } else { 64 };
-        let counter = self.total_len / 64;
-
-        let mut flags: u32 = 0;
-        if self.total_len == 0 { flags |= 1; }  // CHUNK_START
-        if is_final { flags |= 2 | 8; }          // CHUNK_END | ROOT
-
-        let mut state = [
-            self.cv[0], self.cv[1], self.cv[2], self.cv[3],
-            self.cv[4], self.cv[5], self.cv[6], self.cv[7],
-            IV[0], IV[1], IV[2], IV[3],
-            counter as u32, (counter >> 32) as u32, block_len, flags,
-        ];
-
-        // 7 rounds
-        for round in 0..7 {
-            let s = &MSG_SCHEDULE[round];
-            // Column step
-            g(&mut state, 0, 4, 8, 12, m[s[0]], m[s[1]]);
-            g(&mut state, 1, 5, 9, 13, m[s[2]], m[s[3]]);
-            g(&mut state, 2, 6, 10, 14, m[s[4]], m[s[5]]);
-            g(&mut state, 3, 7, 11, 15, m[s[6]], m[s[7]]);
-            // Diagonal step
-            g(&mut state, 0, 5, 10, 15, m[s[8]], m[s[9]]);
-            g(&mut state, 1, 6, 11, 12, m[s[10]], m[s[11]]);
-            g(&mut state, 2, 7, 8, 13, m[s[12]], m[s[13]]);
-            g(&mut state, 3, 4, 9, 14, m[s[14]], m[s[15]]);
-        }
-
-        // XOR the two halves
-        for i in 0..8 {
-            self.cv[i] = state[i] ^ state[i + 8];
-        }
-
-        self.total_len += 64;
-    }
-
-    fn finalize(mut self) -> [u8; 32] {
-        // Pad remaining buffer with zeros
-        for i in self.buf_len..64 {
-            self.buf[i] = 0;
-        }
-
-        self.compress_block(true);
-
-        // Output chaining value as bytes (little-endian)
-        let mut out = [0u8; 32];
-        for (i, word) in self.cv.iter().enumerate() {
-            out[i * 4..(i + 1) * 4].copy_from_slice(&word.to_le_bytes());
-        }
-        out
-    }
-}
-
-/// BLAKE3 G function (quarter round)
-#[inline]
-fn g(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize, mx: u32, my: u32) {
-    state[a] = state[a].wrapping_add(state[b]).wrapping_add(mx);
-    state[d] = (state[d] ^ state[a]).rotate_right(16);
-    state[c] = state[c].wrapping_add(state[d]);
-    state[b] = (state[b] ^ state[c]).rotate_right(12);
-    state[a] = state[a].wrapping_add(state[b]).wrapping_add(my);
-    state[d] = (state[d] ^ state[a]).rotate_right(8);
-    state[c] = state[c].wrapping_add(state[d]);
-    state[b] = (state[b] ^ state[c]).rotate_right(7);
 }
 
 #[cfg(test)]

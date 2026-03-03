@@ -17,6 +17,9 @@ path = "examples/stable_hash_demo.rs"
 name = "lowering_demo"
 path = "examples/lowering_demo.rs"
 
+[dependencies]
+blake3 = "1"
+
 [features]
 default = []
 
