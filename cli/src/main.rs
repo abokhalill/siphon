@@ -50,10 +50,15 @@ fn main() -> ExitCode {
         "verify" => {
             if args.len() < 3 {
                 eprintln!("Error: missing witness file");
-                eprintln!("Usage: siphon verify <witness.json>");
+                eprintln!("Usage: siphon verify <witness.json> [--protocol <file>]");
                 return ExitCode::from(1);
             }
-            cmd_verify(&args[2])
+            let protocol_file = if args.len() >= 5 && args[3] == "--protocol" {
+                Some(args[4].as_str())
+            } else {
+                None
+            };
+            cmd_verify(&args[2], protocol_file)
         }
         "bench" => {
             if args.len() < 3 {
@@ -97,7 +102,7 @@ fn print_usage() {
     eprintln!("    check <protocol>                        Run Phase A only");
     eprintln!("    compile <protocol> [--emit-witness F]   Run Phase A + Phase B");
     eprintln!("    bench <protocol>                        Execute JIT + Reference under load");
-    eprintln!("    verify <witness.json>                   Verify witness artifact");
+    eprintln!("    verify <witness.json> [--protocol F]    Verify witness artifact");
     eprintln!("    help                                    Print this help message");
     eprintln!("    version                                 Print version information");
     eprintln!();
@@ -125,7 +130,8 @@ fn cmd_check(protocol_path: &str) -> ExitCode {
     println!("Protocol: {}", protocol_path);
     println!();
     
-    let graph = protocol.to_rif_graph();
+    let owned_graph = protocol.to_rif_graph();
+    let graph = owned_graph.as_graph();
     let sha = match compute_semantic_hash(&graph) {
         Ok(h) => h,
         Err(e) => {
@@ -185,7 +191,8 @@ fn cmd_compile(protocol_path: &str, witness_file: Option<&str>) -> ExitCode {
     println!("Protocol: {}", protocol_path);
     println!();
     
-    let graph = protocol.to_rif_graph();
+    let owned_graph = protocol.to_rif_graph();
+    let graph = owned_graph.as_graph();
     let sha = match compute_semantic_hash(&graph) {
         Ok(h) => h,
         Err(e) => {
@@ -253,7 +260,7 @@ fn cmd_compile(protocol_path: &str, witness_file: Option<&str>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn cmd_verify(witness_path: &str) -> ExitCode {
+fn cmd_verify(witness_path: &str, protocol_path: Option<&str>) -> ExitCode {
     println!("═══════════════════════════════════════════════════════════════");
     println!("  SIPHON VERIFY — Witness Verification");
     println!("═══════════════════════════════════════════════════════════════");
@@ -296,23 +303,63 @@ fn cmd_verify(witness_path: &str) -> ExitCode {
     println!("└─────────────────────────────────────────────────────────────┘");
     println!();
     
-    // Verify witness
-    println!("VERIFICATION:");
+    // Internal consistency verification
+    println!("INTERNAL CONSISTENCY:");
     
     match witness.verify() {
         Ok(()) => {
             println!("  ✓ Entry count matches microop count");
             println!("  ✓ Mask monotonicity preserved");
             println!("  ✓ Phase B hash verified");
-            println!();
-            println!("✓ Witness verification PASSED");
-            ExitCode::SUCCESS
         }
         Err(e) => {
-            println!("  ✗ Verification FAILED: {:?}", e);
-            ExitCode::from(1)
+            println!("  ✗ Internal verification FAILED: {:?}", e);
+            return ExitCode::from(1);
         }
     }
+    
+    // Graph-level verification (if protocol provided)
+    if let Some(proto_path) = protocol_path {
+        println!();
+        println!("GRAPH VERIFICATION (--protocol {}):", proto_path);
+        
+        let protocol = match load_protocol(proto_path) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("  ✗ Error loading protocol: {}", e);
+                return ExitCode::from(1);
+            }
+        };
+        
+        let owned_graph = protocol.to_rif_graph();
+        let graph = owned_graph.as_graph();
+        let sha = match compute_semantic_hash(&graph) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("  ✗ Error computing semantic hash: {:?}", e);
+                return ExitCode::from(1);
+            }
+        };
+        
+        match witness.verify_against_graph(&graph, &sha) {
+            Ok(()) => {
+                println!("  ✓ Phase A hash matches protocol");
+                println!("  ✓ All RIF node references in bounds");
+                println!("  ✓ MicroOp tags match RIF node types");
+            }
+            Err(e) => {
+                println!("  ✗ Graph verification FAILED: {:?}", e);
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        println!();
+        println!("  (graph verification skipped — use --protocol <file> to enable)");
+    }
+    
+    println!();
+    println!("✓ Witness verification PASSED");
+    ExitCode::SUCCESS
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -344,7 +391,8 @@ fn cmd_bench(protocol_path: &str) -> ExitCode {
     println!();
     
     // Phase A + B
-    let graph = protocol.to_rif_graph();
+    let owned_graph = protocol.to_rif_graph();
+    let graph = owned_graph.as_graph();
     let sha = match compute_semantic_hash(&graph) {
         Ok(h) => h,
         Err(e) => {
@@ -663,7 +711,8 @@ fn cmd_bench_batch(protocol_path: &str) -> ExitCode {
         }
     };
 
-    let graph = protocol.to_rif_graph();
+    let owned_graph = protocol.to_rif_graph();
+    let graph = owned_graph.as_graph();
     let sha = match compute_semantic_hash(&graph) {
         Ok(h) => h,
         Err(e) => {
