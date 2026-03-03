@@ -1,8 +1,10 @@
 # Siphon
 
-**Deterministic Protocol Execution Engine**
+**Protocol Compilation Engine (Research Prototype)**
 
-Siphon compiles fixed-layout protocol specifications into JIT'd x86-64 machine code for parsing binary messages. Currently a research prototype.
+Siphon compiles fixed-layout protocol specifications into JIT-emitted x86-64 machine code with a witness artifact linking generated code back to the specification.
+
+> **Status:** Research prototype. Not production-hardened. See [Current Limitations](#current-limitations) and [Implementation Status](#implementation-status).
 
 ## Quick Start
 
@@ -16,15 +18,18 @@ cd cli && cargo build --release
 ./target/release/siphon bench protocols/market_data.siphon
 ```
 
-## Performance (Preliminary)
+## Observed Performance (Uncontrolled)
 
-Microbenchmark results on the Golden Demo protocol (64-byte fixed layout, 6 fields). These numbers are **not production-grade measurements** — no core pinning, no NUMA control, no perf counters, no percentile reporting. They compare JIT output against a deliberately simple scalar reference interpreter.
+Measured on a single machine, no core pinning, no NUMA control, no perf counters.
+These numbers are **indicative only** and not reproducible benchmarks.
 
-| Metric | Value | Caveat |
-|--------|-------|--------|
-| JIT latency | ~17–21 ns/msg | `Instant`-based, mean only |
-| Speedup vs reference interpreter | ~37–57x | Baseline is intentionally simple |
-| Divergence | 0 | On generated test corpus only |
+| Metric | Observed |
+|--------|----------|
+| JIT latency | ~17–21 ns/msg |
+| Speedup vs reference interpreter | ~37–57x |
+| Output divergence (JIT vs reference) | 0 on test corpus |
+
+Methodology limitations: `Instant`-based timing over 10k iterations, no confidence intervals, no percentile reporting, compared against built-in scalar reference interpreter only.
 
 ---
 
@@ -48,16 +53,16 @@ Traditional approaches fall short:
 
 ---
 
-## The Solution
+## The Approach
 
 Siphon treats protocol definitions as the source of truth—not just for documentation, but for execution. Rather than *generating* code that *interprets* a specification, Siphon *compiles* the specification directly into machine instructions.
 
-**Current properties:**
+**Design goals:**
 
-- **Deterministic** — Same input → same output (single-implementation; cross-machine reproducibility not yet validated)
-- **Witness-traced** — Every codegen decision is recorded in a witness artifact mapping MicroOps to RIF nodes. Independent verification is not yet implemented.
-- **Scalar fast path** — Current emitter produces scalar x86-64 code with stack-backed virtual registers. SIMD/branchless backend is architectural target, not current reality.
+- **Deterministic** — Same protocol definition produces the same kernel within a single toolchain version
+- **Auditable** — Witness artifact records every lowering decision from RIF node to MicroOp
 - **Cache-friendly** — Predictable memory access, no pointer chasing
+- **Compact** — Generated kernels target L1i residency
 
 ---
 
@@ -78,56 +83,57 @@ Siphon treats protocol definitions as the source of truth—not just for documen
 │  • Compute Semantic Hash (SH_A) — content-addressed identity        │
 │                                                                     │
 │  Output: RIF Graph + SH_A                                           │
-│  Properties: Pure, safe Rust. No unsafe. Deterministic.             │
+│  Properties: Safe Rust. No unsafe. Deterministic.                   │
 └─────────────────────────────────────────────────────────────────────┘
                                    │
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  PHASE B: Lowering Engine                                            │
-│  ────────────────────────                                            │
-│  • Lower RIF to MicroOps (instruction templates)                     │
+│  PHASE B: Lowering Engine                                           │
+│  ─────────────────────────────────                                  │
+│  • Lower RIF to MicroOps (instruction templates)                    │
 │  • Allocate registers (linear scan, no spilling)                    │
-│  • Emit x86-64 scalar machine code (SIMD backend planned)           │
-│  • Generate Witness (codegen trace, not independent proof)          │
+│  • Emit x86-64 scalar machine code (JIT)                            │
+│  • Generate Witness (per-MicroOp audit trail)                       │
 │                                                                     │
 │  Output: Executable kernel + Witness + SH_B                         │
-│  Status: Self-attested witness; independent verifier not yet built   │
+│  Note: Witness records lowering decisions but does not              │
+│        independently verify machine-code semantics.                 │
 └─────────────────────────────────────────────────────────────────────┘
                                    │
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  RUNTIME: Physical Execution (Partial)                               │
-│  ─────────────────────────────────────                               │
-│  • io_uring packet ingress (scaffold; incomplete lifecycle)          │
+│  RUNTIME: Execution (Experimental)                                  │
+│  ────────────────────────────                                       │
+│  • io_uring packet ingress (partial, Linux only)                    │
 │  • Version dispatcher (bounded jump table)                          │
-│  • JIT kernel execution (scalar; branches in prologue/stores)       │
+│  • JIT kernel execution                                             │
 │                                                                     │
-│  Status: Runtime is experimental. No production ingress lifecycle.   │
+│  Status: Scaffold. Not a complete ingress lifecycle.                │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Phase A: Trusted Computing Base
 
-The security boundary. Pure, safe Rust that can be formally audited.
+Safe Rust that can be audited.
 
 - **RIF (Restricted Intermediate Form)** — DAG of typed operations with explicit memory regions and bounds. No pointers, recursion, or dynamic allocation.
-- **Semantic Hash (SH_A)** — Cryptographic fingerprint of protocol *meaning*, not syntax.
+- **Semantic Hash (SH_A)** — Hash of protocol semantics (currently uses a built-in hash implementation; audited crate replacement planned).
 
 ### Phase B: Lowering Engine
 
-Translates RIF into machine code. Outside the TCB. Witness traces codegen decisions but does not constitute independent proof of correctness.
+Translates RIF into machine code. Generates a witness artifact for auditability.
 
-- **MicroOps** — Closed set of instruction templates with fixed footprints
-- **Witness** — Trace artifact mapping each MicroOp to a RIF node with mask state
+- **MicroOps** — Closed set of instruction templates with declared footprints
+- **Witness** — Records which RIF node produced each MicroOp, with mask state snapshots. Checks internal consistency (entry count, mask monotonicity, hash integrity). Does not independently verify emitted machine code.
 - **Register Allocation** — Linear scan with hard failure on pressure (no spilling)
 
 ### Runtime (Experimental)
 
-Partial runtime scaffold. Not a complete production data plane.
+Partial scaffold for packet processing. Not a complete data-plane.
 
-- **io_uring** — Partial scaffold for packet ingress (no submit/recycle lifecycle)
-- **Version Dispatcher** — Bounded jump table
-- **Slow path** — Currently a no-op; must be replaced with reference interpreter fallback
+- **io_uring** — Ring setup and CQ polling implemented; SQ submission and buffer recycling not complete
+- **Version Dispatcher** — Bounded jump table routing packets to registered kernels
+- **Slow Path** — Stub only; does not preserve packet semantics
 
 ---
 
@@ -141,7 +147,7 @@ Partial runtime scaffold. Not a complete production data plane.
 protocol MarketData {
     version: 1;
     max_size: 64;
-    
+
     msg_type:     u8  @offset(0)  @range(1, 10);
     sequence:     u32 @offset(2)  @nonzero;
     timestamp_ns: u64 @offset(6)  @range(0, 86400000000000);
@@ -171,52 +177,68 @@ $ siphon compile protocols/market_data.siphon
 
 ```bash
 $ siphon bench protocols/market_data.siphon
-✓ Benchmark PASSED — JIT matches reference byte-for-byte
-  Latency: 21 ns/msg | Speedup: 44x | Divergence: 0
+✓ Benchmark PASSED — JIT output matches reference byte-for-byte
+  Latency: ~21 ns/msg | Speedup: ~44x | Divergence: 0
 ```
 
 ---
 
-## Witness Artifacts
+## Witness & Replay
 
-Compilation produces a witness JSON artifact recording all codegen decisions. The current `verify` command checks internal witness consistency (entry count, monotonicity, hash integrity). It does **not** independently verify machine code semantics.
+Compilation produces a witness artifact recording all lowering decisions.
 
 ```bash
-# Emit witness for inspection
+# Emit witness
 $ siphon compile protocols/market_data.siphon --emit-witness witness.json
 
-# Check witness internal consistency
+# Verify witness internal consistency
 $ siphon verify witness.json
 ✓ Witness verification PASSED
 ```
 
-**Current limitations:**
-- Replay seed is derived but not used to drive codegen decisions
-- Cross-machine determinism is not validated
-- Independent verification (disassembly-based) is not yet implemented
+Current `verify` checks: entry count matches MicroOp count, mask monotonicity, hash integrity.
+Not yet implemented: independent verification against protocol graph, machine-code disassembly verification.
 
 ---
 
-## Design Goals (Not All Achieved)
+## Implementation Status
 
-| Technique | Status |
+| Component | Status |
 |-----------|--------|
-| **Branchless hot path** | **Not yet.** Current scalar emitter has conditional branches in prologue and masked stores. |
-| **No allocation** | Kernel hot path has no heap allocation. Runtime init path does allocate. |
-| **I-cache resident** | Kernel fits in L1i. 16KB hard budget enforced. |
-| **Predictable** | Deterministic codegen within single implementation. Cross-machine not validated. |
+| Protocol parser (Phase A) | Working. Field overlap detection not implemented. |
+| RIF construction & validation | Working. |
+| Semantic hash (SH_A) | Working. Uses built-in hash; audited crate planned. |
+| Scalar JIT codegen (Phase B) | Working. Emits scalar x86-64 with stack-based vregs. Contains conditional branches for masked stores and prologue bounds check. |
+| AVX2 SIMD backend | Encoder exists (`backend/x86_64.rs`) but is not integrated into the primary lowering path. |
+| Batch (4-packet) kernel | Compiles but no correctness verification against reference. |
+| Witness generation | Working. Self-attested; no independent verifier. |
+| Witness verification (CLI) | Checks internal consistency only. Does not bind to protocol graph or disassemble code. |
+| Deterministic replay | Replay seed derived and printed. Not used to drive codegen decisions. |
+| io_uring runtime | Partial scaffold. CQ polling works; no complete RX/process/recycle lifecycle. |
+| Version dispatcher | Working for registered kernels. Slow path is a no-op stub. |
+| NUMA / core pinning | Documented as requirement. Not enforced in code. |
+| Benchmark harness | Basic `Instant`-based timing. No core pinning, perf counters, or statistical rigor. |
 
 ---
 
-## Limitations
+## Current Limitations
 
-Siphon is designed for fixed-layout binary protocols with high-throughput requirements. It does **not** support:
+Siphon is designed for fixed-layout binary protocols. It does **not** support:
 
 - Variable-length fields
 - Optional fields
 - Recursive structures
 - Dynamic schemas
-- Non-x86 architectures (currently x86-64 only)
+- Non-x86 architectures (x86-64 only)
+
+Additionally:
+
+- No independent machine-code verification (witness is self-attested by the emitter)
+- No cross-machine determinism validation
+- No register spilling (hard failure on pressure)
+- 16KB hard I-cache budget with no graceful degradation
+- 512 RIF node cap, 4096 witness entry cap
+- No production-grade benchmark methodology
 
 ---
 
