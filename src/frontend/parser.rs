@@ -37,7 +37,7 @@ pub fn parse_protocol(content: &str) -> Result<Protocol, ParseError> {
 
     let mut name = String::from("unnamed");
     let mut version: u8 = 1;
-    let mut fields = Vec::new();
+    let mut fields: Vec<ProtocolField> = Vec::new();
     let mut current_offset: u32 = 0;
     let mut max_size: u16 = 64;
     let mut field_names = std::collections::HashSet::new();
@@ -89,6 +89,20 @@ pub fn parse_protocol(content: &str) -> Result<Protocol, ParseError> {
                 });
             }
             field_names.insert(field.name.clone());
+
+            let new_start = field.offset;
+            let new_end = field.offset + field.scalar_type.size_bytes() as u32;
+            for existing in &fields {
+                let ex_start = existing.offset;
+                let ex_end = existing.offset + existing.scalar_type.size_bytes() as u32;
+                if new_start < ex_end && ex_start < new_end {
+                    return Err(ParseError::OverlappingFields {
+                        line: line_num + 1,
+                        field1: existing.name.clone(),
+                        field2: field.name,
+                    });
+                }
+            }
 
             fields.push(field);
         }
@@ -292,6 +306,28 @@ big_field: u64 @offset(4)
 "#;
         let result = parse_protocol(input);
         assert!(matches!(result, Err(ParseError::FieldExceedsMaxSize { .. })));
+    }
+
+    #[test]
+    fn test_parse_overlapping_fields() {
+        let input = r#"
+max_size: 64;
+first: u32 @offset(0)
+second: u32 @offset(2)
+"#;
+        let result = parse_protocol(input);
+        assert!(matches!(result, Err(ParseError::OverlappingFields { .. })));
+    }
+
+    #[test]
+    fn test_parse_adjacent_fields_ok() {
+        let input = r#"
+max_size: 64;
+first: u32 @offset(0)
+second: u32 @offset(4)
+"#;
+        let result = parse_protocol(input);
+        assert!(result.is_ok());
     }
 
     #[test]
