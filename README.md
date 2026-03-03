@@ -2,7 +2,7 @@
 
 **Deterministic Protocol Execution Engine**
 
-Siphon compiles protocol specifications into verified, branchless machine code that parses binary messages at memory bandwidth.
+Siphon compiles fixed-layout protocol specifications into JIT'd x86-64 machine code for parsing binary messages. Currently a research prototype.
 
 ## Quick Start
 
@@ -16,14 +16,15 @@ cd cli && cargo build --release
 ./target/release/siphon bench protocols/market_data.siphon
 ```
 
-## Performance
+## Performance (Preliminary)
 
-| Metric | Value |
-|--------|-------|
-| JIT latency | **21 ns/msg** |
-| Throughput | **47M msg/s** |
-| Speedup vs interpreter | **44x** |
-| Divergence | **0** (byte-for-byte verified) |
+Microbenchmark results on the Golden Demo protocol (64-byte fixed layout, 6 fields). These numbers are **not production-grade measurements** — no core pinning, no NUMA control, no perf counters, no percentile reporting. They compare JIT output against a deliberately simple scalar reference interpreter.
+
+| Metric | Value | Caveat |
+|--------|-------|--------|
+| JIT latency | ~17–21 ns/msg | `Instant`-based, mean only |
+| Speedup vs reference interpreter | ~37–57x | Baseline is intentionally simple |
+| Divergence | 0 | On generated test corpus only |
 
 ---
 
@@ -51,11 +52,11 @@ Traditional approaches fall short:
 
 Siphon treats protocol definitions as the source of truth—not just for documentation, but for execution. Rather than *generating* code that *interprets* a specification, Siphon *compiles* the specification directly into machine instructions.
 
-**Key properties:**
+**Current properties:**
 
-- **Deterministic** — Same input → same output, always
-- **Verifiable** — Mathematical proof that generated code matches specification
-- **Branchless** — No conditional jumps in the hot path
+- **Deterministic** — Same input → same output (single-implementation; cross-machine reproducibility not yet validated)
+- **Witness-traced** — Every codegen decision is recorded in a witness artifact mapping MicroOps to RIF nodes. Independent verification is not yet implemented.
+- **Scalar fast path** — Current emitter produces scalar x86-64 code with stack-backed virtual registers. SIMD/branchless backend is architectural target, not current reality.
 - **Cache-friendly** — Predictable memory access, no pointer chasing
 
 ---
@@ -82,27 +83,26 @@ Siphon treats protocol definitions as the source of truth—not just for documen
                                    │
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  PHASE B: Verified Lowering Engine                                  │
-│  ─────────────────────────────────                                  │
-│  • Lower RIF to MicroOps (SIMD instruction templates)               │
+│  PHASE B: Lowering Engine                                            │
+│  ────────────────────────                                            │
+│  • Lower RIF to MicroOps (instruction templates)                     │
 │  • Allocate registers (linear scan, no spilling)                    │
-│  • Emit x86-64 AVX2 machine code                                    │
-│  • Generate Witness (proof of semantic equivalence)                 │
+│  • Emit x86-64 scalar machine code (SIMD backend planned)           │
+│  • Generate Witness (codegen trace, not independent proof)          │
 │                                                                     │
 │  Output: Executable kernel + Witness + SH_B                         │
-│  Invariant: SH_B derived from SH_A proves equivalence               │
+│  Status: Self-attested witness; independent verifier not yet built   │
 └─────────────────────────────────────────────────────────────────────┘
                                    │
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  RUNTIME: Physical Execution                                        │
-│  ────────────────────────────                                       │
-│  • io_uring zero-copy packet ingress                                │
+│  RUNTIME: Physical Execution (Partial)                               │
+│  ─────────────────────────────────────                               │
+│  • io_uring packet ingress (scaffold; incomplete lifecycle)          │
 │  • Version dispatcher (bounded jump table)                          │
-│  • JIT kernel execution (branchless, straight-line)                 │
-│  • Non-temporal stores (cache-bypassing output)                     │
+│  • JIT kernel execution (scalar; branches in prologue/stores)       │
 │                                                                     │
-│  Properties: No heap allocation. No syscalls in hot path.           │
+│  Status: Runtime is experimental. No production ingress lifecycle.   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -115,19 +115,19 @@ The security boundary. Pure, safe Rust that can be formally audited.
 
 ### Phase B: Lowering Engine
 
-Translates RIF into machine code. Outside the TCB but fully verifiable via the Witness.
+Translates RIF into machine code. Outside the TCB. Witness traces codegen decisions but does not constitute independent proof of correctness.
 
-- **MicroOps** — Closed set of SIMD instruction templates with fixed footprints
-- **Witness** — Proof that every MicroOp corresponds to a RIF node
+- **MicroOps** — Closed set of instruction templates with fixed footprints
+- **Witness** — Trace artifact mapping each MicroOp to a RIF node with mask state
 - **Register Allocation** — Linear scan with hard failure on pressure (no spilling)
 
-### Runtime
+### Runtime (Experimental)
 
-Executes compiled kernels with zero heap allocation and no syscalls in the hot path.
+Partial runtime scaffold. Not a complete production data plane.
 
-- **io_uring** — Zero-copy packet ingress
-- **Version Dispatcher** — Bounded jump table with Spectre mitigation
-- **Non-Temporal Stores** — Cache-bypassing output
+- **io_uring** — Partial scaffold for packet ingress (no submit/recycle lifecycle)
+- **Version Dispatcher** — Bounded jump table
+- **Slow path** — Currently a no-op; must be replaced with reference interpreter fallback
 
 ---
 
@@ -177,44 +177,34 @@ $ siphon bench protocols/market_data.siphon
 
 ---
 
-## Deterministic Replay
+## Witness Artifacts
 
-Every compilation produces a **Replay Seed** derived from the protocol specification and compilation decisions. Given the same seed, Siphon produces *identical* machine code on any machine.
+Compilation produces a witness JSON artifact recording all codegen decisions. The current `verify` command checks internal witness consistency (entry count, monotonicity, hash integrity). It does **not** independently verify machine code semantics.
 
 ```bash
-# Emit witness for CI verification
+# Emit witness for inspection
 $ siphon compile protocols/market_data.siphon --emit-witness witness.json
 
-# Verify artifact matches witness
+# Check witness internal consistency
 $ siphon verify witness.json
 ✓ Witness verification PASSED
 ```
 
-**Use cases:**
-- Reproduce production issues locally with exact same code
-- CI artifact verification before deployment
-- Audit trail for compliance
+**Current limitations:**
+- Replay seed is derived but not used to drive codegen decisions
+- Cross-machine determinism is not validated
+- Independent verification (disassembly-based) is not yet implemented
 
 ---
 
-## Why It's Fast
+## Design Goals (Not All Achieved)
 
-| Technique | Benefit |
-|-----------|---------|
-| **Branchless** | No mispredictions—validation uses masks, not jumps |
-| **No allocation** | Pre-allocated buffers, no malloc in hot path |
-| **I-cache resident** | Entire kernel fits in L1i (<1KB) |
-| **Non-temporal stores** | Output bypasses cache, preserves working set |
-| **Predictable** | Same code path for every message |
-
-### Comparison
-
-| Metric | Siphon | Protobuf | FlatBuffers |
-|--------|--------|----------|-------------|
-| Parse latency | **21 ns** | 500-2000 ns | 50-200 ns |
-| Branches | 0 | Many | Few |
-| Heap allocation | None | Per-message | None |
-| Verification | Witness proof | None | None |
+| Technique | Status |
+|-----------|--------|
+| **Branchless hot path** | **Not yet.** Current scalar emitter has conditional branches in prologue and masked stores. |
+| **No allocation** | Kernel hot path has no heap allocation. Runtime init path does allocate. |
+| **I-cache resident** | Kernel fits in L1i. 16KB hard budget enforced. |
+| **Predictable** | Deterministic codegen within single implementation. Cross-machine not validated. |
 
 ---
 
