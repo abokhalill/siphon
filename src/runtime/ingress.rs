@@ -518,7 +518,11 @@ pub enum IoUringError {
     RegisterFailed,
 }
 
-pub fn default_slow_path(_packet: *const u8, _len: u32, _version: u8) {
+/// Slow path that logs the unhandled version to stderr.
+/// Callers should replace this with application-specific handling.
+pub fn default_slow_path(_packet: *const u8, _len: u32, version: u8) {
+    #[cfg(debug_assertions)]
+    eprintln!("siphon: unhandled protocol version {}", version);
 }
 
 #[cfg(test)]
