@@ -861,31 +861,72 @@ impl LoweringEngine {
     }
 
     fn emit_batch_prologue(&self, code: &mut ExecutableBuffer, min_packet_len: u16) -> Result<(), LoweringError> {
-        // Bounds check for batch: check first packet length (simplified)
-        if min_packet_len > 0 {
-            code.write(&[0x81, 0xFE])?;           // CMP ESI, imm32
-            code.write(&(min_packet_len as u32).to_le_bytes())?;
-            code.write(&[0x72, 0x02])?;           // JB +2 (to early exit, skip JMP)
-            code.write(&[0xEB, 0x06])?;           // JMP +6 (skip early exit)
-            code.write(&[0xB8, 0x00, 0x00, 0x00, 0x00])?;  // MOV EAX, 0 (no packets succeeded)
-            code.write(&[0xC3])?;                 // RET
-        }
-
+        // frame setup
         code.write(&[0x55, 0x48, 0x89, 0xE5])?;                       // push rbp; mov rbp, rsp
         code.write(&[0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57])?; // push r12-r15
+        // allocate 256 bytes stack for VReg spills (32 slots * 8 bytes)
+        code.write(&[0x48, 0x81, 0xEC, 0x00, 0x01, 0x00, 0x00])?;     // sub rsp, 256
+
+        // r12=packets, r13=lens, r14=outputs
         code.write(&[0x49, 0x89, 0xFC])?;                             // mov r12, rdi
         code.write(&[0x49, 0x89, 0xF5])?;                             // mov r13, rsi
         code.write(&[0x49, 0x89, 0xD6])?;                             // mov r14, rdx
+
         code.write(&[0xC5, 0xFC, 0x77])?;                             // VZEROALL
+
+        // build per-lane length validity mask in EAX:
+        // for each lane i: check lens[i] >= min_packet_len, accumulate bits
+        if min_packet_len > 0 {
+            code.write(&[0x31, 0xC0])?;                                // xor eax, eax
+            for lane in 0..4u8 {
+                let disp = (lane as u32) * 4;
+                // MOV ECX, [r13 + disp8]
+                code.write(&[0x41, 0x8B, 0x4D, disp as u8])?;
+                // CMP ECX, min_packet_len
+                code.write(&[0x81, 0xF9])?;
+                code.write(&(min_packet_len as u32).to_le_bytes())?;
+                // SETAE CL
+                code.write(&[0x0F, 0x93, 0xC1])?;
+                // SHL ECX, lane
+                if lane > 0 {
+                    code.write(&[0xC1, 0xE1, lane])?;
+                } else {
+                    code.write(&[0x0F, 0xB6, 0xC9])?;  // MOVZX ECX, CL
+                }
+                // OR EAX, ECX
+                code.write(&[0x09, 0xC8])?;
+            }
+            // save initial lane mask to r15d for epilogue
+            code.write(&[0x41, 0x89, 0xC7])?;                         // mov r15d, eax
+        } else {
+            code.write(&[0x41, 0xBF, 0x0F, 0x00, 0x00, 0x00])?;       // mov r15d, 0xF
+        }
+
+        // load 4 packet base addresses into ymm13 (used as gather indices)
+        // VMOVDQU ymm13, [r12]  — 4 qword pointers
+        code.write(&[0xC4, 0x41, 0x7D, 0x6F, 0x2C, 0x24])?;          // vmovdqu ymm13, [r12]
+
+        // load 4 output base addresses into ymm12
+        // VMOVDQU ymm12, [r14]
+        code.write(&[0xC4, 0x41, 0x7D, 0x6F, 0x26])?;                // vmovdqu ymm12, [r14]
+
+        // init ymm15 = all-ones (all lanes valid)
+        code.write(&[0xC4, 0x41, 0x05, 0x76, 0xFF])?;                 // VPCMPEQD ymm15, ymm15, ymm15
         Ok(())
     }
 
     fn emit_batch_epilogue(&self, code: &mut ExecutableBuffer) -> Result<(), LoweringError> {
-        code.write(&[0x0F, 0xAE, 0xF8])?;                             // SFENCE
+        // extract per-lane validation from ymm15 (each qword is all-ones or all-zeros)
+        // VMOVMSKPD eax, ymm15 — extract sign bits of 4 doubles → 4-bit mask
+        code.write(&[0xC4, 0xC1, 0x7D, 0x50, 0xC7])?;                // vmovmskpd eax, ymm15
+        // AND with initial length mask (lanes that failed bounds check)
+        code.write(&[0x44, 0x21, 0xF8])?;                             // and eax, r15d
+
         code.write(&[0xC5, 0xF8, 0x77])?;                             // VZEROUPPER
+        // restore stack (undo sub rsp, 256)
+        code.write(&[0x48, 0x81, 0xC4, 0x00, 0x01, 0x00, 0x00])?;     // add rsp, 256
         code.write(&[0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C])?; // pop r15-r12
         code.write(&[0x48, 0x89, 0xEC, 0x5D])?;                       // mov rsp, rbp; pop rbp
-        code.write(&[0xB8, 0x0F, 0x00, 0x00, 0x00])?;                 // mov eax, 0xF
         code.write(&[0xC3])?;                                         // ret
         Ok(())
     }
@@ -902,24 +943,40 @@ impl LoweringEngine {
                 self.emit_broadcast_imm64(code, *dst, *value, *scalar_type)
             }
             MicroOp::ValidateCmpGe { dst_mask, src, comparand, scalar_type } => {
+                // src >= comparand == NOT(comparand > src)
                 if scalar_type.is_unsigned() {
-                    self.emit_unsigned_cmpgt_batch(code, *dst_mask, *src, *comparand)
+                    self.emit_unsigned_cmpge_batch(code, *dst_mask, *src, *comparand)?;
                 } else {
-                    self.emit_vpcmpgtq(code, *dst_mask, *src, *comparand)
+                    // VPCMPGTQ tmp, comparand, src → tmp = comparand > src
+                    // VPANDN dst, tmp, all_ones → dst = NOT(tmp) = src >= comparand
+                    self.emit_vpcmpgtq(code, VReg(14), *comparand, *src)?;
+                    self.emit_vpandn(code, *dst_mask, VReg(14), VReg(15))?;
                 }
+                // accumulate into ymm15
+                self.emit_vpand(code, VReg(15), VReg(15), *dst_mask)
             }
             MicroOp::ValidateCmpLe { dst_mask, src, comparand, scalar_type } => {
+                // src <= comparand == NOT(src > comparand)
                 if scalar_type.is_unsigned() {
-                    self.emit_unsigned_cmpgt_batch(code, *dst_mask, *comparand, *src)
+                    self.emit_unsigned_cmple_batch(code, *dst_mask, *src, *comparand)?;
                 } else {
-                    self.emit_vpcmpgtq(code, *dst_mask, *comparand, *src)
+                    // VPCMPGTQ tmp, src, comparand → tmp = src > comparand
+                    // VPANDN dst, tmp, all_ones → dst = NOT(tmp) = src <= comparand
+                    self.emit_vpcmpgtq(code, VReg(14), *src, *comparand)?;
+                    self.emit_vpandn(code, *dst_mask, VReg(14), VReg(15))?;
                 }
+                // accumulate into ymm15
+                self.emit_vpand(code, VReg(15), VReg(15), *dst_mask)
             }
             MicroOp::ValidateCmpEq { dst_mask, src, imm_or_reg, scalar_type: _ } => {
-                self.emit_vpcmpeqq(code, *dst_mask, *src, *imm_or_reg)
+                self.emit_vpcmpeqq(code, *dst_mask, *src, *imm_or_reg)?;
+                // accumulate into ymm15
+                self.emit_vpand(code, VReg(15), VReg(15), *dst_mask)
             }
             MicroOp::ValidateNonZero { dst_mask, src, scalar_type: _ } => {
-                self.emit_validate_nonzero(code, *dst_mask, *src)
+                self.emit_validate_nonzero(code, *dst_mask, *src)?;
+                // accumulate into ymm15
+                self.emit_vpand(code, VReg(15), VReg(15), *dst_mask)
             }
             MicroOp::MaskAnd { dst, src1, src2 } => {
                 self.emit_vpand(code, *dst, *src1, *src2)
@@ -928,7 +985,8 @@ impl LoweringEngine {
                 self.emit_vpor(code, *dst, *src1, *src2)
             }
             MicroOp::MaskNot { dst, src } => {
-                let scratch = VReg(15);
+                // use ymm14 as scratch (ymm15 is reserved as validation accumulator)
+                let scratch = VReg(14);
                 self.emit_vpcmpeqd(code, scratch, scratch, scratch)?;
                 self.emit_vpandn(code, *dst, *src, scratch)
             }
@@ -961,84 +1019,136 @@ impl LoweringEngine {
 
     fn emit_batch_load(&self, code: &mut ExecutableBuffer, dst: VReg, offset: u32, scalar_type: ScalarType) -> Result<(), LoweringError> {
         let dst_reg = dst.0 & 0x0F;
-        code.write(&[0x49, 0x8B, 0x04, 0x24])?;  // mov rax, [r12]
 
-        match scalar_type.size_bytes() {
-            8 => {
-                // VBROADCASTSD ymm, [rax+disp32] — 8-byte load, broadcast to 4 qwords
-                if dst_reg < 8 {
-                    code.write(&[0xC4, 0xE2, 0x7D, 0x19])?;
-                } else {
-                    code.write(&[0xC4, 0x62, 0x7D, 0x19])?;
+        // strategy: add field offset to each packet base address in ymm13,
+        // then gather 4 qwords. for sub-8-byte types, mask after gather.
+        //
+        // ymm14 = ymm13 + broadcast(offset); 4 effective addresses
+        // ymm(dst) = gather from those addresses
+        //
+        // we use scalar loop approach for correctness since VPGATHERQQ
+        // requires specific mask/index register constraints that interact
+        // poorly with our VReg allocation. scalar loop is 4 iterations,
+        // still processes all 4 packets per microop.
+
+        // for each lane: load from packet[lane] + offset into qword lane of ymm(dst)
+        // uses rax as scratch, builds result on stack then VMOVDQU into dst
+
+        // SUB RSP, 32  ; temp space for 4 qwords
+        code.write(&[0x48, 0x83, 0xEC, 0x20])?;
+
+        for lane in 0..4u8 {
+            let pkt_disp = (lane as u32) * 8;
+            // MOV RAX, [r12 + lane*8]  ; packet pointer for this lane
+            code.write(&[0x49, 0x8B, 0x44, 0x24, pkt_disp as u8])?;
+
+            // load scalar at offset from packet
+            match scalar_type.size_bytes() {
+                8 => {
+                    // MOV RAX, [RAX + offset]
+                    code.write(&[0x48, 0x8B, 0x80])?;
+                    code.write(&offset.to_le_bytes())?;
                 }
-                let modrm = 0x80 | ((dst_reg & 7) << 3);
-                code.write(&[modrm])?;
-                code.write(&offset.to_le_bytes())?;
+                4 => {
+                    // MOV EAX, [RAX + offset] (zero-extends to 64)
+                    code.write(&[0x8B, 0x80])?;
+                    code.write(&offset.to_le_bytes())?;
+                }
+                2 => {
+                    // MOVZX EAX, word [RAX + offset]
+                    code.write(&[0x0F, 0xB7, 0x80])?;
+                    code.write(&offset.to_le_bytes())?;
+                }
+                _ => {
+                    // MOVZX EAX, byte [RAX + offset]
+                    code.write(&[0x0F, 0xB6, 0x80])?;
+                    code.write(&offset.to_le_bytes())?;
+                }
             }
-            4 => {
-                // MOV EAX, [RAX+disp32] — 4-byte load, zero-extended
-                code.write(&[0x8B, 0x80])?;
-                code.write(&offset.to_le_bytes())?;
-                // VMOVD xmm(dst), EAX — VEX.128.66.0F 6E /r
-                let r_inv = if dst_reg < 8 { 0x80u8 } else { 0x00u8 };
-                code.write(&[0xC4, r_inv | 0x61, 0x79, 0x6E, 0xC0 | ((dst_reg & 7) << 3)])?;
-                // VPBROADCASTD ymm(dst), xmm(dst) — VEX.256.66.0F38 58 /r
-                let b_inv = if dst_reg < 8 { 0x20u8 } else { 0x00u8 };
-                code.write(&[0xC4, r_inv | 0x42 | b_inv, 0x7D, 0x58, 0xC0 | ((dst_reg & 7) << 3) | (dst_reg & 7)])?;
-            }
-            2 => {
-                // MOVZX EAX, word [RAX+disp32] — 2-byte load, zero-extended
-                code.write(&[0x0F, 0xB7, 0x80])?;
-                code.write(&offset.to_le_bytes())?;
-                // VMOVD xmm(dst), EAX
-                let r_inv = if dst_reg < 8 { 0x80u8 } else { 0x00u8 };
-                code.write(&[0xC4, r_inv | 0x61, 0x79, 0x6E, 0xC0 | ((dst_reg & 7) << 3)])?;
-                // VPBROADCASTW ymm(dst), xmm(dst) — VEX.256.66.0F38 79 /r
-                let b_inv = if dst_reg < 8 { 0x20u8 } else { 0x00u8 };
-                code.write(&[0xC4, r_inv | 0x42 | b_inv, 0x7D, 0x79, 0xC0 | ((dst_reg & 7) << 3) | (dst_reg & 7)])?;
-            }
-            _ => {
-                // U8: MOVZX EAX, byte [RAX+disp32] — 1-byte load, zero-extended
-                code.write(&[0x0F, 0xB6, 0x80])?;
-                code.write(&offset.to_le_bytes())?;
-                // VMOVD xmm(dst), EAX
-                let r_inv = if dst_reg < 8 { 0x80u8 } else { 0x00u8 };
-                code.write(&[0xC4, r_inv | 0x61, 0x79, 0x6E, 0xC0 | ((dst_reg & 7) << 3)])?;
-                // VPBROADCASTB ymm(dst), xmm(dst) — VEX.256.66.0F38 78 /r
-                let b_inv = if dst_reg < 8 { 0x20u8 } else { 0x00u8 };
-                code.write(&[0xC4, r_inv | 0x42 | b_inv, 0x7D, 0x78, 0xC0 | ((dst_reg & 7) << 3) | (dst_reg & 7)])?;
-            }
+
+            // MOV [RSP + lane*8], RAX — store to temp
+            let lane_disp = (lane as u32) * 8;
+            code.write(&[0x48, 0x89, 0x44, 0x24, lane_disp as u8])?;
         }
+
+        // VMOVDQU ymm(dst), [RSP] — load all 4 qwords
+        if dst_reg < 8 {
+            code.write(&[0xC5, 0xFD, 0x6F, 0x04 | ((dst_reg & 7) << 3), 0x24])?;
+        } else {
+            code.write(&[0xC4, 0x61, 0x7D, 0x6F, 0x04 | ((dst_reg & 7) << 3), 0x24])?;
+        }
+
+        // ADD RSP, 32 — restore temp
+        code.write(&[0x48, 0x83, 0xC4, 0x20])?;
 
         Ok(())
     }
 
     fn emit_batch_store(&self, code: &mut ExecutableBuffer, src: VReg, offset: u32) -> Result<(), LoweringError> {
         let src_reg = src.0 & 0x0F;
-        code.write(&[0x49, 0x8B, 0x06])?;  // mov rax, [r14]
+
+        // scatter: store each qword lane to its corresponding output buffer.
+        // VMOVDQU [RSP-32], ymm(src) — spill source to stack temp
+        code.write(&[0x48, 0x83, 0xEC, 0x20])?;  // sub rsp, 32
         if src_reg < 8 {
-            code.write(&[0xC5, 0xFD, 0xE7])?;
+            code.write(&[0xC5, 0xFD, 0x7F, 0x04 | ((src_reg & 7) << 3), 0x24])?;
         } else {
-            code.write(&[0xC4, 0x41, 0x7D, 0xE7])?;
+            code.write(&[0xC4, 0x61, 0x7D, 0x7F, 0x04 | ((src_reg & 7) << 3), 0x24])?;
         }
-        let modrm = 0x80 | ((src_reg & 7) << 3);
-        code.write(&[modrm])?;
-        code.write(&offset.to_le_bytes())?;
+
+        for lane in 0..4u8 {
+            let lane_disp = (lane as u32) * 8;
+            // MOV RAX, [RSP + lane*8] — load qword for this lane
+            code.write(&[0x48, 0x8B, 0x44, 0x24, lane_disp as u8])?;
+            // MOV RCX, [r14 + lane*8] — output pointer for this lane
+            let out_disp = (lane as u32) * 8;
+            code.write(&[0x49, 0x8B, 0x4E, out_disp as u8])?;
+            // MOV [RCX + offset], RAX — write to output
+            if offset < 128 {
+                code.write(&[0x48, 0x89, 0x41, offset as u8])?;
+            } else {
+                code.write(&[0x48, 0x89, 0x81])?;
+                code.write(&offset.to_le_bytes())?;
+            }
+        }
+
+        // ADD RSP, 32 — restore
+        code.write(&[0x48, 0x83, 0xC4, 0x20])?;
         Ok(())
     }
 
-    fn emit_unsigned_cmpgt_batch(&self, code: &mut ExecutableBuffer, dst: VReg, src: VReg, comparand: VReg) -> Result<(), LoweringError> {
-        let sign_bit = VReg(15);
-        let tmp_a = VReg(14);
+    /// unsigned src >= comparand: sign-flip both, then NOT(VPCMPGTQ(comparand_flipped, src_flipped))
+    fn emit_unsigned_cmpge_batch(&self, code: &mut ExecutableBuffer, dst: VReg, src: VReg, comparand: VReg) -> Result<(), LoweringError> {
+        let tmp = VReg(14);
+        // broadcast sign bit for unsigned→signed conversion
+        self.emit_broadcast_imm64(code, tmp, 0x8000000000000000u64, ScalarType::U64)?;
+        // flip sign bits: signed_src = src XOR 0x80..0
+        self.emit_vpxor(code, dst, src, tmp)?;
+        // flip comparand: signed_cmp = comparand XOR 0x80..0
+        self.emit_vpxor(code, tmp, comparand, tmp)?;
+        // tmp = signed_cmp > signed_src (i.e. src < comparand, strict)
+        self.emit_vpcmpgtq(code, tmp, tmp, dst)?;
+        // dst = NOT(tmp) = src >= comparand
+        // VPANDN dst, tmp, ymm15 (ymm15 is all-ones)
+        self.emit_vpandn(code, dst, tmp, VReg(15))
+    }
 
-        self.emit_broadcast_imm64(code, sign_bit, 0x8000000000000000u64, ScalarType::U64)?;
-        self.emit_vpxor(code, tmp_a, src, sign_bit)?;
-        self.emit_vpxor(code, sign_bit, comparand, sign_bit)?;
-        self.emit_vpcmpgtq(code, dst, tmp_a, sign_bit)
+    /// unsigned src <= comparand: sign-flip both, then NOT(VPCMPGTQ(src_flipped, comparand_flipped))
+    fn emit_unsigned_cmple_batch(&self, code: &mut ExecutableBuffer, dst: VReg, src: VReg, comparand: VReg) -> Result<(), LoweringError> {
+        let tmp = VReg(14);
+        // broadcast sign bit
+        self.emit_broadcast_imm64(code, tmp, 0x8000000000000000u64, ScalarType::U64)?;
+        // flip sign bits
+        self.emit_vpxor(code, dst, src, tmp)?;        // dst = src_flipped
+        self.emit_vpxor(code, tmp, comparand, tmp)?;  // tmp = cmp_flipped
+        // dst_temp = src_flipped > cmp_flipped (i.e. src > comparand, strict)
+        self.emit_vpcmpgtq(code, tmp, dst, tmp)?;
+        // dst = NOT(tmp) = src <= comparand
+        self.emit_vpandn(code, dst, tmp, VReg(15))
     }
 
     fn emit_batch_bswap(&self, code: &mut ExecutableBuffer, dst: VReg, src: VReg, scalar_type: ScalarType) -> Result<(), LoweringError> {
-        let scratch = VReg(15);
+        let scratch = VReg(14);
 
         let (lo, hi): (u64, u64) = match scalar_type.size_bytes() {
             8 => (0x0001020304050607u64, 0x08090A0B0C0D0E0Fu64),
