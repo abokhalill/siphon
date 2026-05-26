@@ -1790,16 +1790,50 @@ impl LoweringEngine {
 }
 
 /// Compares JIT output vs reference interpreter.
+/// pre-computes packed output layout to match JIT emit offsets exactly.
 pub struct DivergenceChecker<'a> {
     graph: &'a RifGraph<'a>,
+    /// field_id -> (packed_offset, scalar_type). mirrors RegAlloc::alloc_field_offset.
+    field_layout: [(u16, ScalarType); 256],
 }
 
 impl<'a> DivergenceChecker<'a> {
     pub fn new(graph: &'a RifGraph<'a>) -> Self {
-        Self { graph }
+        let mut layout = [(0u16, ScalarType::U64); 256];
+        let mut next_offset: u16 = 0;
+        let mut seen = [false; 256];
+
+        // replicate alloc_field_offset: scan emit nodes in graph order,
+        // resolve value_node scalar type, pack sequentially.
+        for node in graph.nodes.iter() {
+            if let RifNode::Emit { field_id, value_node, .. } = node {
+                let fid = *field_id as usize;
+                if fid < 256 && !seen[fid] {
+                    let scalar_type = Self::resolve_type(graph, *value_node);
+                    layout[fid] = (next_offset, scalar_type);
+                    next_offset = next_offset.saturating_add(scalar_type.size_bytes() as u16);
+                    seen[fid] = true;
+                }
+            }
+        }
+
+        Self { graph, field_layout: layout }
+    }
+
+    /// trace value_node back to its producing node's scalar type.
+    fn resolve_type(graph: &RifGraph, node_idx: NodeIndex) -> ScalarType {
+        match &graph.nodes[node_idx.0 as usize] {
+            RifNode::Load { scalar_type, .. } => *scalar_type,
+            RifNode::Const { scalar_type, .. } => *scalar_type,
+            RifNode::BinaryOp { result_type, .. } => *result_type,
+            RifNode::UnaryOp { result_type, .. } => *result_type,
+            RifNode::Select { result_type, .. } => *result_type,
+            _ => ScalarType::U64,
+        }
     }
 
     /// Reference interpreter: scalar, simple, obviously correct.
+    /// output layout matches JIT packed offsets exactly.
     pub fn reference_execute(&self, packet: &[u8], output: &mut [u8]) -> Result<ExecutionSignature, ()> {
         let mut sig = ExecutionSignature::new();
         
@@ -1838,9 +1872,14 @@ impl<'a> DivergenceChecker<'a> {
                     let active = mask.map(|m| masks[m.0 as usize]).unwrap_or(true);
                     if active {
                         let val = values[value_node.0 as usize];
-                        let offset = (*field_id as usize) * 8;
-                        if offset + 8 <= output.len() {
-                            output[offset..offset + 8].copy_from_slice(&val.to_le_bytes());
+                        let fid = *field_id as usize;
+                        if fid < 256 {
+                            let (offset, scalar_type) = self.field_layout[fid];
+                            let off = offset as usize;
+                            let size = scalar_type.size_bytes() as usize;
+                            if off + size <= output.len() {
+                                output[off..off + size].copy_from_slice(&val.to_le_bytes()[..size]);
+                            }
                         }
                         sig.record_emit(*field_id, val);
                     }
