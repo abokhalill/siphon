@@ -405,14 +405,14 @@ impl X86_64Encoder {
             MicroOp::ValidateCmpEq { dst_mask, src, imm_or_reg, scalar_type: _ } => {
                 self.emit_vpcmpeqq(*dst_mask, *src, *imm_or_reg)
             }
-            MicroOp::ValidateCmpGt { dst_mask, src, comparand, scalar_type } => {
+            MicroOp::ValidateCmpGe { dst_mask, src, comparand, scalar_type } => {
                 if scalar_type.is_unsigned() {
                     self.emit_unsigned_cmpgt(*dst_mask, *src, *comparand)
                 } else {
                     self.emit_vpcmpgtq(*dst_mask, *src, *comparand)
                 }
             }
-            MicroOp::ValidateCmpLt { dst_mask, src, comparand, scalar_type } => {
+            MicroOp::ValidateCmpLe { dst_mask, src, comparand, scalar_type } => {
                 if scalar_type.is_unsigned() {
                     self.emit_unsigned_cmpgt(*dst_mask, *comparand, *src)
                 } else {

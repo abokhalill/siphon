@@ -297,7 +297,7 @@ impl RifNode {
 
     /// Returns the set of valid MicroOp discriminants for this RifNode type.
     /// SINGLE SOURCE OF TRUTH for RifNode -> MicroOp compatibility.
-    /// MicroOp discriminants: LoadVector=0, ValidateCmpEq=1, ValidateCmpGt=2, ValidateCmpLt=3,
+    /// MicroOp discriminants: LoadVector=0, ValidateCmpEq=1, ValidateCmpGe=2, ValidateCmpLe=3,
     /// ValidateNonZero=4, MaskAnd=5, MaskOr=6, MaskNot=7, Select=8, Emit=9, BroadcastImm=10,
     /// Add=11, Sub=12, And=13, Or=14, Xor=15, ByteSwap=16, Nop=17
     pub const fn valid_microop_tags(&self) -> &'static [u8] {

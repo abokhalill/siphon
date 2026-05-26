@@ -108,14 +108,14 @@ pub enum MicroOp {
         scalar_type: ScalarType,
     } = 1,
 
-    ValidateCmpGt {
+    ValidateCmpGe {
         dst_mask: VReg,
         src: VReg,
         comparand: VReg,
         scalar_type: ScalarType,
     } = 2,
 
-    ValidateCmpLt {
+    ValidateCmpLe {
         dst_mask: VReg,
         src: VReg,
         comparand: VReg,
@@ -218,8 +218,8 @@ impl MicroOp {
         match self {
             MicroOp::LoadVector { .. } => 0,
             MicroOp::ValidateCmpEq { .. } => 1,
-            MicroOp::ValidateCmpGt { .. } => 2,
-            MicroOp::ValidateCmpLt { .. } => 3,
+            MicroOp::ValidateCmpGe { .. } => 2,
+            MicroOp::ValidateCmpLe { .. } => 3,
             MicroOp::ValidateNonZero { .. } => 4,
             MicroOp::MaskAnd { .. } => 5,
             MicroOp::MaskOr { .. } => 6,
@@ -247,8 +247,8 @@ impl MicroOp {
             
             // Compares: 4-5 bytes
             MicroOp::ValidateCmpEq { .. } => 5,
-            MicroOp::ValidateCmpGt { .. } => 5,
-            MicroOp::ValidateCmpLt { .. } => 5,
+            MicroOp::ValidateCmpGe { .. } => 5,
+            MicroOp::ValidateCmpLe { .. } => 5,
             MicroOp::ValidateNonZero { .. } => 5,
             
             // Mask ops: 3-4 bytes (K-register ops are compact)
@@ -302,8 +302,8 @@ impl MicroOp {
                 required_alignment: 0,
                 max_offset: u32::MAX,
             },
-            MicroOp::ValidateCmpGt { dst_mask, src, comparand, .. } |
-            MicroOp::ValidateCmpLt { dst_mask, src, comparand, .. } => MicroOpContract {
+            MicroOp::ValidateCmpGe { dst_mask, src, comparand, .. } |
+            MicroOp::ValidateCmpLe { dst_mask, src, comparand, .. } => MicroOpContract {
                 inputs: [Some(*src), Some(*comparand), None],
                 output: None,
                 mask_in: None,
@@ -414,8 +414,8 @@ impl MicroOp {
         match self {
             MicroOp::LoadVector { .. } => "LoadVector",
             MicroOp::ValidateCmpEq { .. } => "ValidateCmpEq",
-            MicroOp::ValidateCmpGt { .. } => "ValidateCmpGt",
-            MicroOp::ValidateCmpLt { .. } => "ValidateCmpLt",
+            MicroOp::ValidateCmpGe { .. } => "ValidateCmpGe",
+            MicroOp::ValidateCmpLe { .. } => "ValidateCmpLe",
             MicroOp::ValidateNonZero { .. } => "ValidateNonZero",
             MicroOp::MaskAnd { .. } => "MaskAnd",
             MicroOp::MaskOr { .. } => "MaskOr",
@@ -444,11 +444,11 @@ impl MicroOp {
                 format!("dst=v{}, src=v{}, cmp=v{}, type={:?}", 
                     dst_mask.0, src.0, imm_or_reg.0, scalar_type)
             }
-            MicroOp::ValidateCmpGt { dst_mask, src, comparand, scalar_type } => {
+            MicroOp::ValidateCmpGe { dst_mask, src, comparand, scalar_type } => {
                 format!("dst=v{}, src=v{}, cmp=v{}, type={:?}", 
                     dst_mask.0, src.0, comparand.0, scalar_type)
             }
-            MicroOp::ValidateCmpLt { dst_mask, src, comparand, scalar_type } => {
+            MicroOp::ValidateCmpLe { dst_mask, src, comparand, scalar_type } => {
                 format!("dst=v{}, src=v{}, cmp=v{}, type={:?}", 
                     dst_mask.0, src.0, comparand.0, scalar_type)
             }
@@ -506,8 +506,8 @@ impl MicroOp {
             MicroOp::ValidateCmpEq { dst_mask, src, imm_or_reg, .. } => {
                 Some((dst_mask.0, Some(src.0), Some(imm_or_reg.0)))
             }
-            MicroOp::ValidateCmpGt { dst_mask, src, comparand, .. } |
-            MicroOp::ValidateCmpLt { dst_mask, src, comparand, .. } => {
+            MicroOp::ValidateCmpGe { dst_mask, src, comparand, .. } |
+            MicroOp::ValidateCmpLe { dst_mask, src, comparand, .. } => {
                 Some((dst_mask.0, Some(src.0), Some(comparand.0)))
             }
             MicroOp::ValidateNonZero { dst_mask, src, .. } => {

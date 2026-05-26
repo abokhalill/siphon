@@ -156,8 +156,8 @@ fn demo_validated_kernel() {
                 match op {
                     siphon_tcb::lowering::MicroOp::LoadVector { .. } => load_count += 1,
                     siphon_tcb::lowering::MicroOp::ValidateCmpEq { .. } |
-                    siphon_tcb::lowering::MicroOp::ValidateCmpGt { .. } |
-                    siphon_tcb::lowering::MicroOp::ValidateCmpLt { .. } |
+                    siphon_tcb::lowering::MicroOp::ValidateCmpGe { .. } |
+                    siphon_tcb::lowering::MicroOp::ValidateCmpLe { .. } |
                     siphon_tcb::lowering::MicroOp::ValidateNonZero { .. } => validate_count += 1,
                     siphon_tcb::lowering::MicroOp::MaskAnd { .. } |
                     siphon_tcb::lowering::MicroOp::MaskOr { .. } |

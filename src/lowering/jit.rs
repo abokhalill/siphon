@@ -478,7 +478,7 @@ impl LoweringEngine {
                 return Ok(());
             }
             BinaryOp::Lt => {
-                let microop = MicroOp::ValidateCmpLt {
+                let microop = MicroOp::ValidateCmpLe {
                     dst_mask: dst,
                     src: lhs_reg,
                     comparand: rhs_reg,
@@ -490,7 +490,7 @@ impl LoweringEngine {
                 return Ok(());
             }
             BinaryOp::Gt => {
-                let microop = MicroOp::ValidateCmpGt {
+                let microop = MicroOp::ValidateCmpGe {
                     dst_mask: dst,
                     src: lhs_reg,
                     comparand: rhs_reg,
@@ -640,7 +640,7 @@ impl LoweringEngine {
                 ops.push(hi_op)?;
 
                 let ge_mask = regalloc.alloc()?;
-                let ge_op = MicroOp::ValidateCmpGt {
+                let ge_op = MicroOp::ValidateCmpGe {
                     dst_mask: ge_mask,
                     src,
                     comparand: lo_reg,
@@ -651,7 +651,7 @@ impl LoweringEngine {
                 regalloc.free(lo_reg);
 
                 let le_mask = regalloc.alloc()?;
-                let le_op = MicroOp::ValidateCmpLt {
+                let le_op = MicroOp::ValidateCmpLe {
                     dst_mask: le_mask,
                     src,
                     comparand: hi_reg,
@@ -901,14 +901,14 @@ impl LoweringEngine {
             MicroOp::BroadcastImm { dst, value, scalar_type } => {
                 self.emit_broadcast_imm64(code, *dst, *value, *scalar_type)
             }
-            MicroOp::ValidateCmpGt { dst_mask, src, comparand, scalar_type } => {
+            MicroOp::ValidateCmpGe { dst_mask, src, comparand, scalar_type } => {
                 if scalar_type.is_unsigned() {
                     self.emit_unsigned_cmpgt_batch(code, *dst_mask, *src, *comparand)
                 } else {
                     self.emit_vpcmpgtq(code, *dst_mask, *src, *comparand)
                 }
             }
-            MicroOp::ValidateCmpLt { dst_mask, src, comparand, scalar_type } => {
+            MicroOp::ValidateCmpLe { dst_mask, src, comparand, scalar_type } => {
                 if scalar_type.is_unsigned() {
                     self.emit_unsigned_cmpgt_batch(code, *dst_mask, *comparand, *src)
                 } else {
@@ -1096,11 +1096,11 @@ impl LoweringEngine {
             MicroOp::BroadcastImm { dst, value, scalar_type: _ } => {
                 self.emit_scalar_const(code, *dst, *value)
             }
-            MicroOp::ValidateCmpGt { dst_mask, src, comparand, scalar_type } => {
-                self.emit_scalar_cmp_gt(code, *dst_mask, *src, *comparand, *scalar_type)
+            MicroOp::ValidateCmpGe { dst_mask, src, comparand, scalar_type } => {
+                self.emit_scalar_cmp_ge(code, *dst_mask, *src, *comparand, *scalar_type)
             }
-            MicroOp::ValidateCmpLt { dst_mask, src, comparand, scalar_type } => {
-                self.emit_scalar_cmp_lt(code, *dst_mask, *src, *comparand, *scalar_type)
+            MicroOp::ValidateCmpLe { dst_mask, src, comparand, scalar_type } => {
+                self.emit_scalar_cmp_le(code, *dst_mask, *src, *comparand, *scalar_type)
             }
             MicroOp::ValidateCmpEq { dst_mask, src, imm_or_reg, scalar_type: _ } => {
                 self.emit_scalar_cmp_eq(code, *dst_mask, *src, *imm_or_reg)
@@ -1289,27 +1289,27 @@ impl LoweringEngine {
         Ok(())
     }
 
-    fn emit_scalar_cmp_gt(&self, code: &mut ExecutableBuffer, dst_mask: VReg, src: VReg, comparand: VReg, scalar_type: ScalarType) -> Result<(), LoweringError> {
+    fn emit_scalar_cmp_ge(&self, code: &mut ExecutableBuffer, dst_mask: VReg, src: VReg, comparand: VReg, scalar_type: ScalarType) -> Result<(), LoweringError> {
         self.emit_load_vreg_to_rax(code, src)?;
         self.emit_load_vreg_to_rcx(code, comparand)?;
         code.write(&[0x48, 0x39, 0xC8])?;  // CMP RAX, RCX
         if scalar_type.is_unsigned() {
-            code.write(&[0x0F, 0x97, 0xC0])?;  // SETA AL
+            code.write(&[0x0F, 0x93, 0xC0])?;  // SETAE AL (above or equal)
         } else {
-            code.write(&[0x0F, 0x9F, 0xC0])?;  // SETG AL
+            code.write(&[0x0F, 0x9D, 0xC0])?;  // SETGE AL (greater or equal)
         }
         code.write(&[0x48, 0x0F, 0xB6, 0xC0])?;
         self.emit_store_rax_to_vreg(code, dst_mask)
     }
 
-    fn emit_scalar_cmp_lt(&self, code: &mut ExecutableBuffer, dst_mask: VReg, src: VReg, comparand: VReg, scalar_type: ScalarType) -> Result<(), LoweringError> {
+    fn emit_scalar_cmp_le(&self, code: &mut ExecutableBuffer, dst_mask: VReg, src: VReg, comparand: VReg, scalar_type: ScalarType) -> Result<(), LoweringError> {
         self.emit_load_vreg_to_rax(code, src)?;
         self.emit_load_vreg_to_rcx(code, comparand)?;
         code.write(&[0x48, 0x39, 0xC8])?;  // CMP RAX, RCX
         if scalar_type.is_unsigned() {
-            code.write(&[0x0F, 0x92, 0xC0])?;  // SETB AL
+            code.write(&[0x0F, 0x96, 0xC0])?;  // SETBE AL (below or equal)
         } else {
-            code.write(&[0x0F, 0x9C, 0xC0])?;  // SETL AL
+            code.write(&[0x0F, 0x9E, 0xC0])?;  // SETLE AL (less or equal)
         }
         code.write(&[0x48, 0x0F, 0xB6, 0xC0])?;
         self.emit_store_rax_to_vreg(code, dst_mask)
